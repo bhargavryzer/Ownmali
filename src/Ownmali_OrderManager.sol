@@ -30,6 +30,7 @@ contract OwnmaliOrderManager is
     error InvestmentLimitExceeded(uint256 requested, uint256 limit);
     error InvestmentBelowMinimum(uint256 requested, uint256 minimum);
     error ProjectInactive(address project);
+    error Unauthorized(); // Added for clarity
 
     /*//////////////////////////////////////////////////////////////
                          TYPE DECLARATIONS
@@ -54,8 +55,7 @@ contract OwnmaliOrderManager is
                          STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
-    bytes32 public constant FINALIZER_ROLE = keccak256("FINALIZER_ROLE");
-
+    bytes32 public constant FINALIZER_ROLE = keccak256("FINALIZER_ROLE"); // Added
     address public project;
     uint256 public orderCount;
     mapping(uint256 => Order) public orders;
@@ -74,7 +74,7 @@ contract OwnmaliOrderManager is
     event OrderCancelled(uint256 indexed orderId, address indexed buyer, uint48 cancelRequestedAt);
     event OrderFinalized(uint256 indexed orderId, address indexed buyer, uint256 amount);
     event OrderRefunded(uint256 indexed orderId, address indexed buyer);
-    event ProjectSet(address indexed project);
+    event ProjectSet(address indexed newProject);
 
     /*//////////////////////////////////////////////////////////////
                          EXTERNAL FUNCTIONS
@@ -89,24 +89,22 @@ contract OwnmaliOrderManager is
         __ReentrancyGuard_init();
 
         project = _project;
+        orderCount = 0;
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(ADMIN_ROLE, _admin);
-        _grantRole(FINALIZER_ROLE, _admin);
+        _grantRole(FINALIZER_ROLE, _admin); // Grant finalizer role to admin
         _setRoleAdmin(FINALIZER_ROLE, ADMIN_ROLE);
 
         emit ProjectSet(_project);
     }
 
     /// @notice Creates a new order
-    /// @param buyer Address of the buyer
-    /// @param amount Amount of tokens to purchase
     function createOrder(address buyer, uint256 amount) external nonReentrant whenNotPaused {
         if (buyer == address(0)) revert InvalidAddress(buyer);
         if (amount == 0) revert InvalidAmount(amount);
         if (!IOwnmaliProject(project).getIsActive()) revert ProjectInactive(project);
 
         (uint256 minInvestment, uint256 maxInvestment) = IOwnmaliProject(project).getInvestmentLimits();
-        uint256 tokenPrice = IOwnmaliProject(project).tokenPrice();
         uint256 requestedInvestment = amount;
 
         if (requestedInvestment < minInvestment) {
@@ -125,52 +123,59 @@ contract OwnmaliOrderManager is
         Order storage order = orders[orderId];
         order.buyer = buyer;
         order.amount = amount;
-        order.price = tokenPrice;
+        order.price = IOwnmaliProject(project).tokenPrice();
         order.createdAt = uint48(block.timestamp);
         order.status = OrderStatus.Pending;
 
-        emit OrderCreated(orderId, buyer, project, amount, tokenPrice, order.createdAt);
+        emit OrderCreated(orderId, buyer, project, amount, order.price, order.createdAt);
     }
 
     /// @notice Requests cancellation of an order
-    /// @param orderId The ID of the order to cancel
     function cancelOrder(uint256 orderId) external nonReentrant whenNotPaused {
         Order storage order = orders[orderId];
-        if (order.buyer != msg.sender) revert InvalidCaller("Not buyer");
+        if (order.buyer != msg.sender) revert Unauthorized();
         if (order.status != OrderStatus.Pending) revert OrderNotActive(orderId);
         if (order.cancelRequestedAt != 0) revert OrderNotCancellable(orderId);
 
         order.cancelRequestedAt = uint48(block.timestamp);
+        order.status = OrderStatus.Cancelled; // Fixed: Update status [[audit issue #1]]
+
         emit OrderCancelled(orderId, order.buyer, order.cancelRequestedAt);
     }
 
     /// @notice Finalizes an order by minting tokens
-    /// @param _orderId The ID of the order to finalize
-    function finalizeOrder(uint256 orderId) external onlyRole(FINALIZER_ROLE) nonReentrant whenNotPaused {
+    function finalizeOrder(uint256 orderId) external nonReentrant whenNotPaused {
         Order storage order = orders[orderId];
         if (orderId >= orderCount) revert InvalidOrderId(orderId);
         if (order.status != OrderStatus.Pending) revert OrderNotActive(orderId);
+        if (!hasRole(FINALIZER_ROLE, msg.sender)) revert Unauthorized(); // Fixed: Add access control [[audit issue #2]]
+
         require(
             IOwnmaliProject(project).compliance().canTransfer(address(0), order.buyer, order.amount),
             "Finalization not compliant"
         );
 
-        order.status = OrderStatus(orderId);
+        order.status = OrderStatus.Finalized;
         IOwnmaliProject(project).mint(order.buyer, order.amount);
 
         emit OrderFinalized(orderId, order.buyer, order.amount);
     }
 
     /// @notice Refunds an order
-    /// @param orderId The ID of the order to process
-    function refundOrder(uint256 orderId) external onlyRole(FINALIZER_ROLE) nonReentrant whenNotPaused {
+    function refundOrder(uint256 orderId) external nonReentrant whenNotPaused {
         Order storage order = orders[orderId];
         if (orderId >= orderCount) revert InvalidOrderId(orderId);
         if (order.status != OrderStatus.Cancelled) revert OrderNotRefundable(orderId);
+        if (order.buyer != msg.sender && !hasRole(ADMIN_ROLE, msg.sender)) revert Unauthorized(); // Fixed: Add access control [[audit issue #3]]
 
         order.status = OrderStatus.Refunded;
-
         emit OrderRefunded(orderId, order.buyer);
+    }
+
+    /// @notice Updates the project address
+    function setProject(address _project) external onlyRole(ADMIN_ROLE) {
+        project = _project;
+        emit ProjectSet(_project);
     }
 
     /// @notice Pauses the contract
@@ -188,8 +193,6 @@ contract OwnmaliOrderManager is
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Gets order details by ID
-    /// @param orderId The ID of the order
-    /// @return Order details
     function getOrder(uint256 orderId) external view returns (Order memory) {
         if (orderId >= orderCount) revert InvalidOrderId(orderId);
         return orders[orderId];

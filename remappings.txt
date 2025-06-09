@@ -2,3 +2,4 @@
 @openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
 @tokenysolutions/t-rex/=lib/t-rex/contracts/
 forge-std/=lib/forge-std/src/
+@onchain-id/solidity/=node_modules/@onchain-id/solidity/contracts/

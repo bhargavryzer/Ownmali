@@ -33,6 +33,7 @@ contract OwnmaliFactory is
     error InvalidProjectId(bytes32 projectId);
     error TemplateNotSet(string template);
     error ProjectAlreadyExists(bytes32 projectId);
+    error MaxRecipientsExceeded(uint256 limit);
 
     /*//////////////////////////////////////////////////////////////
                          TYPE DECLARATIONS
@@ -71,7 +72,6 @@ contract OwnmaliFactory is
     //////////////////////////////////////////////////////////////*/
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant COMPANY_CREATOR_ROLE = keccak256("COMPANY_CREATOR_ROLE");
-
     address public registry;
     address public projectTemplate;
     address public realEstateTemplate;
@@ -81,6 +81,7 @@ contract OwnmaliFactory is
     address public identityRegistry;
     address public compliance;
     mapping(bytes32 => address) public projects;
+    uint256 public constant MAX_RECIPIENTS = 100; // Prevent gas limit issues
 
     /*//////////////////////////////////////////////////////////////
                          EVENTS
@@ -110,12 +111,7 @@ contract OwnmaliFactory is
     /*//////////////////////////////////////////////////////////////
                          EXTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-
     /// @notice Initializes the factory
-    /// @param _registry Address of the OwnmaliRegistry contract
-    /// @param _admin Admin address for role assignment
-    /// @param _identityRegistry Identity registry address for ERC-3643 compliance
-    /// @param _compliance Compliance contract address
     function initialize(
         address _registry,
         address _admin,
@@ -125,31 +121,22 @@ contract OwnmaliFactory is
         if (_registry == address(0) || _admin == address(0) || _identityRegistry == address(0) || _compliance == address(0)) {
             revert InvalidAddress(address(0));
         }
-
         __AccessControl_init();
         __Pausable_init();
         __ReentrancyGuard_init();
-
         registry = _registry;
         identityRegistry = _identityRegistry;
         compliance = _compliance;
-
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(ADMIN_ROLE, _admin);
         _grantRole(COMPANY_CREATOR_ROLE, _admin);
         _setRoleAdmin(COMPANY_CREATOR_ROLE, ADMIN_ROLE);
-
         emit RegistrySet(_registry);
         emit IdentityRegistrySet(_identityRegistry);
         emit ComplianceSet(_compliance);
     }
 
     /// @notice Sets template addresses for project-related contracts
-    /// @param _projectTemplate Standard project template
-    /// @param _realEstateTemplate Real estate project template
-    /// @param _escrowTemplate Escrow contract template
-    /// @param _orderManagerTemplate Order manager template
-    /// @param _daoTemplate DAO template
     function setTemplates(
         address _projectTemplate,
         address _realEstateTemplate,
@@ -164,13 +151,11 @@ contract OwnmaliFactory is
             _orderManagerTemplate == address(0) ||
             _daoTemplate == address(0)
         ) revert InvalidAddress(address(0));
-
         projectTemplate = _projectTemplate;
         realEstateTemplate = _realEstateTemplate;
         escrowTemplate = _escrowTemplate;
         orderManagerTemplate = _orderManagerTemplate;
         daoTemplate = _daoTemplate;
-
         emit TemplateSet("Project", _projectTemplate);
         emit TemplateSet("RealEstate", _realEstateTemplate);
         emit TemplateSet("Escrow", _escrowTemplate);
@@ -178,16 +163,13 @@ contract OwnmaliFactory is
         emit TemplateSet("DAO", _daoTemplate);
     }
 
-    /// @notice Creates a new company by registering it in the registry
-    /// @param params Company parameters (ID, name, KYC status, country code, metadata CID, owner)
+    /// @notice Creates a new company
     function createCompany(CompanyParams calldata params) external onlyRole(COMPANY_CREATOR_ROLE) nonReentrant whenNotPaused {
         params.companyId.validateId("companyId");
         params.name.validateString("name", 1, 100);
         params.countryCode.validateString("countryCode", 2, 2);
         params.metadataCID.validateCID("metadataCID");
         if (params.owner == address(0)) revert InvalidAddress(params.owner);
-
-        // Register company in the registry (deploys Company contract)
         IOwnmaliRegistry(registry).registerCompany(
             params.companyId,
             params.name,
@@ -196,10 +178,7 @@ contract OwnmaliFactory is
             params.metadataCID,
             params.owner
         );
-
-        // Get the deployed Company contract address
         address companyContract = IOwnmaliRegistry(registry).getCompanyAddress(params.companyId);
-
         emit CompanyCreated(
             params.companyId,
             companyContract,
@@ -212,7 +191,6 @@ contract OwnmaliFactory is
     }
 
     /// @notice Creates a new project with associated contracts
-    /// @param params Project parameters (name, symbol, supply, price, etc.)
     function createProject(ProjectParams calldata params) external nonReentrant whenNotPaused {
         params.companyId.validateId("companyId");
         params.assetId.validateId("assetId");
@@ -230,26 +208,18 @@ contract OwnmaliFactory is
         if (params.maxInvestment < params.minInvestment) revert InvalidParameter("maxInvestment");
         if (params.premintAmount > params.maxSupply) revert InvalidParameter("premintAmount");
         if (projects[params.assetId] != address(0)) revert ProjectAlreadyExists(params.assetId);
-
-        // Verify company exists
         if (IOwnmaliRegistry(registry).getCompanyAddress(params.companyId) == address(0)) {
             revert InvalidCompanyId(params.companyId);
         }
-
-        // Deploy project contract
         address projectTemplateToUse = params.isRealEstate ? realEstateTemplate : projectTemplate;
         if (projectTemplateToUse == address(0)) revert TemplateNotSet(params.isRealEstate ? "RealEstate" : "Project");
         address project = Clones.clone(projectTemplateToUse);
-
-        // Deploy related contracts
         if (escrowTemplate == address(0)) revert TemplateNotSet("Escrow");
         if (orderManagerTemplate == address(0)) revert TemplateNotSet("OrderManager");
         if (daoTemplate == address(0)) revert TemplateNotSet("DAO");
         address escrow = Clones.clone(escrowTemplate);
         address orderManager = Clones.clone(orderManagerTemplate);
         address dao = Clones.clone(daoTemplate);
-
-        // Initialize project
         IOwnmaliProject.ProjectInitParams memory initParams = IOwnmaliProject.ProjectInitParams({
             name: params.name,
             symbol: params.symbol,
@@ -273,16 +243,10 @@ contract OwnmaliFactory is
             compliance: compliance
         });
         IOwnmaliProject(project).initialize(initParams);
-
-        // Initialize related contracts
         IOwnmaliEscrow(escrow).initialize(project, msg.sender);
         IOwnmaliOrderManager(orderManager).initialize(project, msg.sender);
         IOwnmaliDAO(dao).initialize(project, msg.sender, 7 days, 1e18, 51);
-
-        // Set project contracts and premint
         IOwnmaliProject(project).setProjectContractsAndPreMint(escrow, orderManager, dao, params.premintAmount);
-
-        // Register project in registry
         IOwnmaliRegistry(registry).registerProject(
             params.companyId,
             params.assetId,
@@ -291,10 +255,29 @@ contract OwnmaliFactory is
             project,
             params.metadataCID
         );
-
         projects[params.assetId] = project;
-
         emit ProjectCreated(params.companyId, params.assetId, project, escrow, orderManager, dao);
+    }
+
+    /// @notice Updates the registry address
+    function setRegistry(address _registry) external onlyRole(ADMIN_ROLE) {
+        if (_registry == address(0)) revert InvalidAddress(_registry);
+        registry = _registry;
+        emit RegistrySet(_registry);
+    }
+
+    /// @notice Updates the identity registry address
+    function setIdentityRegistry(address _identityRegistry) external onlyRole(ADMIN_ROLE) {
+        if (_identityRegistry == address(0)) revert InvalidAddress(_identityRegistry);
+        identityRegistry = _identityRegistry;
+        emit IdentityRegistrySet(_identityRegistry);
+    }
+
+    /// @notice Updates the compliance address
+    function setCompliance(address _compliance) external onlyRole(ADMIN_ROLE) {
+        if (_compliance == address(0)) revert InvalidAddress(_compliance);
+        compliance = _compliance;
+        emit ComplianceSet(_compliance);
     }
 
     /// @notice Pauses the contract
@@ -310,10 +293,7 @@ contract OwnmaliFactory is
     /*//////////////////////////////////////////////////////////////
                          EXTERNAL VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-
     /// @notice Gets the project address for an asset ID
-    /// @param assetId The asset ID of the project
-    /// @return Address of the project contract
     function getProject(bytes32 assetId) external view returns (address) {
         return projects[assetId];
     }

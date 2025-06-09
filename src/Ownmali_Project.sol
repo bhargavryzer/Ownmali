@@ -41,7 +41,6 @@ contract OwnmaliProject is
     error InvalidMetadataUpdate(uint256 updateId);
     error AlreadySigned(address signer);
     error UpdateAlreadyExecuted(uint256 updateId);
-    error InvalidToken(address token);
 
     /*//////////////////////////////////////////////////////////////
                          TYPE DECLARATIONS
@@ -64,7 +63,6 @@ contract OwnmaliProject is
         uint256 premintAmount;
         uint256 minInvestment;
         uint256 maxInvestment;
-        uint256 eoiPct;
         address identityRegistry;
         address compliance;
     }
@@ -99,7 +97,6 @@ contract OwnmaliProject is
         address owner;
         uint16 chainId;
         bool isActive;
-        uint256 eoiPct;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -111,9 +108,7 @@ contract OwnmaliProject is
     bytes32 public constant AGENT_ROLE = keccak256("AGENT_ROLE");
 
     uint256 public constant TOKEN_DECIMALS = 10 ** 18;
-    uint256 public constant USDT_DECIMALS = 10 ** 6;
     uint256 public constant MAX_DIVIDEND_PCT = 50;
-    uint256 public constant MAX_EOI_PCT = 50;
     uint256 public constant DEFAULT_LOCK_PERIOD = 365 days;
 
     address public factoryOwner;
@@ -123,12 +118,10 @@ contract OwnmaliProject is
     uint256 public tokenPrice;
     uint256 public cancelDelay;
     uint256 public dividendPct;
-    uint256 public eoiPct;
     uint256 public minInvestment;
     uint256 public maxInvestment;
     bytes32 public assetType;
     bytes32 public legalMetadataCID;
-    IERC20 public usdtToken;
     address public escrow;
     address public orderManager;
     address public dao;
@@ -139,7 +132,6 @@ contract OwnmaliProject is
     uint256 public requiredSignatures;
     IIdentityRegistry public identityRegistry;
     IModularCompliance public compliance;
-
     mapping(address => uint48) public lockUntil;
     mapping(uint256 => MetadataUpdate) private metadataUpdates;
     uint256 public metadataUpdateCount;
@@ -155,19 +147,10 @@ contract OwnmaliProject is
     event MetadataUpdated(uint256 indexed updateId, bytes32 oldCID, bytes32 newCID, bool isLegal, uint16 chainId);
     event ProjectContractsSet(address indexed escrow, address indexed orderManager, address indexed dao, uint16 chainId);
     event EmergencyWithdrawal(address indexed recipient, uint256 amount, uint16 chainId);
-    event UsdtTokenSet(address indexed usdtToken, uint16 chainId);
 
     /*//////////////////////////////////////////////////////////////
                          EXTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-
-    function setUsdtToken(address _usdtToken) external {
-        if (_usdtToken == address(0)) revert InvalidAddress(_usdtToken);
-        if (IERC20Metadata(_usdtToken).decimals() != 6) revert InvalidToken(_usdtToken);
-        usdtToken = IERC20(_usdtToken);
-        emit UsdtTokenSet(_usdtToken, chainId);
-    }
-
     function proposeMetadataUpdate(bytes32 newCID, bool isLegal) external onlyRole(PROJECT_ADMIN_ROLE) whenNotPaused {
         if (newCID == bytes32(0)) revert InvalidMetadataCID(newCID);
         uint256 updateId = metadataUpdateCount++;
@@ -185,11 +168,9 @@ contract OwnmaliProject is
         if (update.newCID == bytes32(0)) revert InvalidMetadataUpdate(updateId);
         if (update.executed) revert UpdateAlreadyExecuted(updateId);
         if (update.signed[msg.sender]) revert AlreadySigned(msg.sender);
-
         update.signed[msg.sender] = true;
         update.signatureCount++;
         emit MetadataUpdateSigned(updateId, msg.sender, chainId);
-
         if (update.signatureCount >= requiredSignatures) {
             bytes32 oldCID = update.isLegal ? legalMetadataCID : metadataCID;
             if (update.isLegal) {
@@ -205,16 +186,13 @@ contract OwnmaliProject is
     /*//////////////////////////////////////////////////////////////
                          PUBLIC FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-
     function initialize(bytes memory initData) public virtual initializer {
         ProjectInitParams memory params = abi.decode(initData, (ProjectInitParams));
         _validateInitParams(params);
-
         __UUPSUpgradeable_init();
         __AccessControl_init();
         __ReentrancyGuard_init();
         __Pausable_init();
-
         TrexToken.initialize(
             params.name,
             params.symbol,
@@ -223,9 +201,7 @@ contract OwnmaliProject is
             params.compliance,
             params.projectOwner
         );
-
         _setProjectState(params);
-
         _grantRole(DEFAULT_ADMIN_ROLE, params.projectOwner);
         _grantRole(ADMIN_ROLE, params.projectOwner);
         _grantRole(AGENT_ROLE, params.projectOwner);
@@ -268,7 +244,6 @@ contract OwnmaliProject is
     /*//////////////////////////////////////////////////////////////
                          INTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-
     function _setProjectState(ProjectInitParams memory params) internal virtual {
         factoryOwner = params.factory;
         projectOwner = params.projectOwner;
@@ -277,7 +252,6 @@ contract OwnmaliProject is
         tokenPrice = params.tokenPrice;
         cancelDelay = params.cancelDelay;
         dividendPct = params.dividendPct;
-        eoiPct = params.eoiPct;
         minInvestment = params.minInvestment;
         maxInvestment = params.maxInvestment;
         assetType = params.assetType;
@@ -312,7 +286,6 @@ contract OwnmaliProject is
         if (params.tokenPrice == 0) revert InvalidParameter("tokenPrice");
         if (params.cancelDelay == 0) revert InvalidParameter("cancelDelay");
         if (params.dividendPct > MAX_DIVIDEND_PCT) revert InvalidParameter("dividendPct");
-        if (params.eoiPct > MAX_EOI_PCT) revert InvalidParameter("eoiPct");
         if (params.premintAmount > params.maxSupply) revert InvalidParameter("premintAmount");
         if (params.metadataCID == bytes32(0)) revert InvalidMetadataCID(params.metadataCID);
         if (params.legalMetadataCID == bytes32(0)) revert InvalidMetadataCID(params.legalMetadataCID);
@@ -321,7 +294,7 @@ contract OwnmaliProject is
         if (params.chainId == 0) revert InvalidChainId(params.chainId);
     }
 
-    function _authorizeUpgrade(address newImplementation) internal view override onlyRole(ADMIN_ROLE) {
+    function _authorizeUpgrade(address newImplementation) internal view override onlyRole(DEFAULT_ADMIN_ROLE) {
         if (newImplementation == address(0) || newImplementation.code.length == 0) {
             revert InvalidAddress(newImplementation);
         }
@@ -330,7 +303,6 @@ contract OwnmaliProject is
     /*//////////////////////////////////////////////////////////////
                          EXTERNAL VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-
     function owner() external view returns (address) {
         return projectOwner;
     }
@@ -365,12 +337,42 @@ contract OwnmaliProject is
             dao: dao,
             owner: projectOwner,
             chainId: chainId,
-            isActive: isActive,
-            eoiPct: eoiPct
+            isActive: isActive
         });
     }
 
     function getProjectOwner() external view returns (address) {
         return projectOwner;
+    }
+    
+    // IOwnmaliProject interface implementation
+    function getMetadataUpdate(uint256 updateId) external view returns (
+        bytes32 newCID,
+        bool isLegal,
+        uint256 approvals,
+        bool executed
+    ) {
+        MetadataUpdate storage update = metadataUpdates[updateId];
+        return (update.newCID, update.isLegal, update.approvals, update.executed);
+    }
+    
+    function hasSignedMetadataUpdate(uint256 updateId, address signer) external view returns (bool) {
+        return metadataUpdates[updateId].signers[signer];
+    }
+    
+    function lockUntil(address account) external view returns (uint256) {
+        return lockUntil[account];
+    }
+    
+    function isActive() external view returns (bool) {
+        return isActive;
+    }
+    
+    function lockPeriod() external view returns (uint256) {
+        return lockPeriod;
+    }
+    
+    function metadataUpdateCount() external view returns (uint256) {
+        return metadataUpdateCount;
     }
 }

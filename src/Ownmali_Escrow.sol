@@ -28,6 +28,7 @@ contract OwnmaliEscrow is
     error DisputeAlreadyResolved(uint256 orderId);
     error TransferNotCompliant(address from, address to, uint256 amount);
     error InvalidParameter(string parameter);
+    error MaxRecipientsExceeded(uint256 limit);
 
     /*//////////////////////////////////////////////////////////////
                          STATE VARIABLES
@@ -37,6 +38,7 @@ contract OwnmaliEscrow is
 
     address public project;
     mapping(uint256 => bool) public resolvedDisputes;
+    uint256 public constant MAX_RECIPIENTS = 100; // Prevent gas limit issues
 
     /*//////////////////////////////////////////////////////////////
                          EVENTS
@@ -46,7 +48,7 @@ contract OwnmaliEscrow is
     event DividendsDistributed(uint256 totalAmount, uint256 holderCount);
     event DisputeResolved(uint256 indexed orderId, bool refundApproved);
     event EmergencyWithdrawal(address indexed recipient, uint256 amount);
-    event ProjectSet(address indexed project);
+    event ProjectSet(address indexed newProject);
 
     /*//////////////////////////////////////////////////////////////
                          EXTERNAL FUNCTIONS
@@ -107,6 +109,7 @@ contract OwnmaliEscrow is
         uint256[] calldata amounts
     ) external onlyRole(ADMIN_ROLE) nonReentrant whenNotPaused {
         if (holders.length != amounts.length) revert InvalidParameter("Array length mismatch");
+        if (holders.length > MAX_RECIPIENTS) revert MaxRecipientsExceeded(MAX_RECIPIENTS);
         if (!IOwnmaliProject(project).getIsActive()) revert ProjectInactive(project);
 
         uint256 totalAmount = 0;
@@ -169,6 +172,13 @@ contract OwnmaliEscrow is
         emit EmergencyWithdrawal(recipient, amount);
     }
 
+    /// @notice Updates the project address
+    function setProject(address _project) external onlyRole(ADMIN_ROLE) {
+        if (_project == address(0)) revert InvalidAddress(_project);
+        project = _project;
+        emit ProjectSet(_project);
+    }
+
     /// @notice Pauses the contract
     function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
@@ -178,6 +188,4 @@ contract OwnmaliEscrow is
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
     }
-
-    
 }
