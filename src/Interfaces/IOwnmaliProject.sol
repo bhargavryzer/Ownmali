@@ -147,8 +147,8 @@ interface IOwnmaliProject is IERC20, IERC20Metadata {
     function approve(address spender, uint256 amount) external override returns (bool);
     
     function transferFrom(address from, address to, uint256 amount) external override returns (bool);
-}
-    function balanceOf(address account) external view returns (uint256);
+    
     function pause() external;
+    
     function unpause() external;
 }
