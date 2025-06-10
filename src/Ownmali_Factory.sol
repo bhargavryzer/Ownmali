@@ -2,22 +2,24 @@
 pragma solidity 0.8.30;
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
-import "./interfaces/IOwnmaliProject.sol";
-import "./interfaces/IOwnmaliRegistry.sol";
-import "./interfaces/IOwnmaliEscrow.sol";
-import "./interfaces/IOwnmaliOrderManager.sol";
-import "./interfaces/IOwnmaliDAO.sol";
+import "./Ownmali_Interfaces.sol";
 import "./Ownmali_Validation.sol";
+import "./Ownmali_Project.sol";
+import "./Ownmali_Escrow.sol";
+import "./Ownmali_OrderManager.sol";
+import "./Ownmali_DAO.sol";
 
 /// @title OwnmaliFactory
-/// @notice Factory contract for creating and managing Ownmali projects
-/// @dev Deploys clones of project-related contracts with ERC-3643 compliance
+/// @notice Factory contract for deploying tokenized asset projects in the Ownmali ecosystem, with one project per company
+/// @dev Uses Clones for gas-efficient deployment of project, escrow, order manager, and DAO contracts
 contract OwnmaliFactory is
     Initializable,
+    UUPSUpgradeable,
     AccessControlUpgradeable,
     PausableUpgradeable,
     ReentrancyGuardUpgradeable
@@ -25,259 +27,184 @@ contract OwnmaliFactory is
     using OwnmaliValidation for *;
 
     /*//////////////////////////////////////////////////////////////
-                         ERRORS
+                             ERRORS
     //////////////////////////////////////////////////////////////*/
-    error InvalidAddress(address addr);
-    error InvalidParameter(string parameter);
-    error InvalidCompanyId(bytes32 companyId);
-    error InvalidProjectId(bytes32 projectId);
-    error TemplateNotSet(string template);
-    error ProjectAlreadyExists(bytes32 projectId);
-    error MaxRecipientsExceeded(uint256 limit);
+    error InvalidAddress(address addr, string parameter);
+    error InvalidParameter(string parameter, string reason);
+    error TemplateNotSet(string templateType);
+    error InitializationFailed(string contractType);
+    error MaxProjectsExceeded(uint256 current, uint256 max);
+    error InvalidAssetType(bytes32 assetType);
+    error CompanyHasProject(bytes32 companyId, bytes32 existingAssetId);
 
     /*//////////////////////////////////////////////////////////////
-                         TYPE DECLARATIONS
+                           TYPE DECLARATIONS
     //////////////////////////////////////////////////////////////*/
-    struct CompanyParams {
-        bytes32 companyId;
-        string name;
-        bool kycStatus;
-        string countryCode;
-        bytes32 metadataCID;
-        address owner;
-    }
-
-    struct ProjectParams {
-        string name;
-        string symbol;
-        uint256 maxSupply;
-        uint256 tokenPrice;
-        uint256 cancelDelay;
-        bytes32 companyId;
-        bytes32 assetId;
-        bytes32 metadataCID;
-        bytes32 assetType;
-        bytes32 legalMetadataCID;
-        uint16 chainId;
-        uint256 dividendPct;
-        uint256 premintAmount;
-        uint256 minInvestment;
-        uint256 maxInvestment;
-        uint256 eoiPct;
-        bool isRealEstate;
+    struct ProjectContracts {
+        address project;
+        address escrow;
+        address orderManager;
+        address dao;
     }
 
     /*//////////////////////////////////////////////////////////////
-                         STATE VARIABLES
+                           STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
-    bytes32 public constant COMPANY_CREATOR_ROLE = keccak256("COMPANY_CREATOR_ROLE");
-    address public registry;
+    bytes32 public constant FACTORY_MANAGER_ROLE = keccak256("FACTORY_MANAGER_ROLE");
+
+    uint256 public maxProjects;
     address public projectTemplate;
-    address public realEstateTemplate;
     address public escrowTemplate;
     address public orderManagerTemplate;
     address public daoTemplate;
-    address public identityRegistry;
-    address public compliance;
-    mapping(bytes32 => address) public projects;
-    uint256 public constant MAX_RECIPIENTS = 100; // Prevent gas limit issues
+    mapping(bytes32 => ProjectContracts) public projects;
+    mapping(bytes32 => bytes32) public companyToProject; // Maps companyId to its single assetId
+    uint256 public projectCount;
 
     /*//////////////////////////////////////////////////////////////
-                         EVENTS
+                             EVENTS
     //////////////////////////////////////////////////////////////*/
-    event CompanyCreated(
-        bytes32 indexed companyId,
-        address indexed companyContract,
-        string name,
-        bool kycStatus,
-        string countryCode,
-        bytes32 metadataCID,
-        address owner
-    );
     event ProjectCreated(
         bytes32 indexed companyId,
-        bytes32 indexed projectId,
-        address project,
+        bytes32 indexed assetId,
+        address indexed project,
         address escrow,
         address orderManager,
         address dao
     );
-    event TemplateSet(string indexed templateType, address template);
-    event RegistrySet(address indexed registry);
-    event IdentityRegistrySet(address indexed identityRegistry);
-    event ComplianceSet(address indexed compliance);
+    event TemplateSet(string templateType, address indexed template);
+    event MaxProjectsSet(uint256 newMax);
 
     /*//////////////////////////////////////////////////////////////
-                         EXTERNAL FUNCTIONS
+                           INITIALIZATION
     //////////////////////////////////////////////////////////////*/
-    /// @notice Initializes the factory
-    function initialize(
-        address _registry,
-        address _admin,
-        address _identityRegistry,
-        address _compliance
-    ) external initializer {
-        if (_registry == address(0) || _admin == address(0) || _identityRegistry == address(0) || _compliance == address(0)) {
-            revert InvalidAddress(address(0));
-        }
+
+    /// @notice Initializes the factory contract
+    /// @param _admin Admin address for role assignment
+    function initialize(address _admin) public initializer {
+        if (_admin == address(0)) revert InvalidAddress(_admin, "admin");
+
+        __UUPSUpgradeable_init();
         __AccessControl_init();
         __Pausable_init();
         __ReentrancyGuard_init();
-        registry = _registry;
-        identityRegistry = _identityRegistry;
-        compliance = _compliance;
+
+        maxProjects = 1000;
+
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(ADMIN_ROLE, _admin);
-        _grantRole(COMPANY_CREATOR_ROLE, _admin);
-        _setRoleAdmin(COMPANY_CREATOR_ROLE, ADMIN_ROLE);
-        emit RegistrySet(_registry);
-        emit IdentityRegistrySet(_identityRegistry);
-        emit ComplianceSet(_compliance);
+        _grantRole(FACTORY_MANAGER_ROLE, _admin);
+        _setRoleAdmin(FACTORY_MANAGER_ROLE, ADMIN_ROLE);
+
+        emit MaxProjectsSet(maxProjects);
     }
 
-    /// @notice Sets template addresses for project-related contracts
-    function setTemplates(
-        address _projectTemplate,
-        address _realEstateTemplate,
-        address _escrowTemplate,
-        address _orderManagerTemplate,
-        address _daoTemplate
-    ) external onlyRole(ADMIN_ROLE) {
-        if (
-            _projectTemplate == address(0) ||
-            _realEstateTemplate == address(0) ||
-            _escrowTemplate == address(0) ||
-            _orderManagerTemplate == address(0) ||
-            _daoTemplate == address(0)
-        ) revert InvalidAddress(address(0));
-        projectTemplate = _projectTemplate;
-        realEstateTemplate = _realEstateTemplate;
-        escrowTemplate = _escrowTemplate;
-        orderManagerTemplate = _orderManagerTemplate;
-        daoTemplate = _daoTemplate;
-        emit TemplateSet("Project", _projectTemplate);
-        emit TemplateSet("RealEstate", _realEstateTemplate);
-        emit TemplateSet("Escrow", _escrowTemplate);
-        emit TemplateSet("OrderManager", _orderManagerTemplate);
-        emit TemplateSet("DAO", _daoTemplate);
-    }
+    /*//////////////////////////////////////////////////////////////
+                           EXTERNAL FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
 
-    /// @notice Creates a new company
-    function createCompany(CompanyParams calldata params) external onlyRole(COMPANY_CREATOR_ROLE) nonReentrant whenNotPaused {
-        params.companyId.validateId("companyId");
-        params.name.validateString("name", 1, 100);
-        params.countryCode.validateString("countryCode", 2, 2);
-        params.metadataCID.validateCID("metadataCID");
-        if (params.owner == address(0)) revert InvalidAddress(params.owner);
-        IOwnmaliRegistry(registry).registerCompany(
-            params.companyId,
-            params.name,
-            params.kycStatus,
-            params.countryCode,
-            params.metadataCID,
-            params.owner
-        );
-        address companyContract = IOwnmaliRegistry(registry).getCompanyAddress(params.companyId);
-        emit CompanyCreated(
-            params.companyId,
-            companyContract,
-            params.name,
-            params.kycStatus,
-            params.countryCode,
-            params.metadataCID,
-            params.owner
-        );
-    }
-
-    /// @notice Creates a new project with associated contracts
-    function createProject(ProjectParams calldata params) external nonReentrant whenNotPaused {
-        params.companyId.validateId("companyId");
-        params.assetId.validateId("assetId");
-        params.name.validateString("name", 1, 100);
-        params.symbol.validateString("symbol", 1, 10);
-        params.metadataCID.validateCID("metadataCID");
-        params.legalMetadataCID.validateCID("legalMetadataCID");
-        if (params.maxSupply == 0) revert InvalidParameter("maxSupply");
-        if (params.tokenPrice == 0) revert InvalidParameter("tokenPrice");
-        if (params.cancelDelay == 0) revert InvalidParameter("cancelDelay");
-        if (params.chainId == 0) revert InvalidParameter("chainId");
-        if (params.dividendPct > 50) revert InvalidParameter("dividendPct");
-        if (params.eoiPct > 50) revert InvalidParameter("eoiPct");
-        if (params.minInvestment == 0) revert InvalidParameter("minInvestment");
-        if (params.maxInvestment < params.minInvestment) revert InvalidParameter("maxInvestment");
-        if (params.premintAmount > params.maxSupply) revert InvalidParameter("premintAmount");
-        if (projects[params.assetId] != address(0)) revert ProjectAlreadyExists(params.assetId);
-        if (IOwnmaliRegistry(registry).getCompanyAddress(params.companyId) == address(0)) {
-            revert InvalidCompanyId(params.companyId);
+    /// @notice Sets the template for a contract type
+    /// @param templateType Type of template ("project", "escrow", "orderManager", "dao")
+    /// @param template Address of the template contract
+    function setTemplate(string memory templateType, address template) external onlyRole(ADMIN_ROLE) {
+        if (template == address(0) || template.code.length == 0) revert InvalidAddress(template, templateType);
+        if (keccak256(abi.encodePacked(templateType)) == keccak256(abi.encodePacked("project"))) {
+            projectTemplate = template;
+        } else if (keccak256(abi.encodePacked(templateType)) == keccak256(abi.encodePacked("escrow"))) {
+            escrowTemplate = template;
+        } else if (keccak256(abi.encodePacked(templateType)) == keccak256(abi.encodePacked("orderManager"))) {
+            orderManagerTemplate = template;
+        } else if (keccak256(abi.encodePacked(templateType)) == keccak256(abi.encodePacked("dao"))) {
+            daoTemplate = template;
+        } else {
+            revert InvalidParameter("templateType", "invalid type");
         }
-        address projectTemplateToUse = params.isRealEstate ? realEstateTemplate : projectTemplate;
-        if (projectTemplateToUse == address(0)) revert TemplateNotSet(params.isRealEstate ? "RealEstate" : "Project");
-        address project = Clones.clone(projectTemplateToUse);
-        if (escrowTemplate == address(0)) revert TemplateNotSet("Escrow");
-        if (orderManagerTemplate == address(0)) revert TemplateNotSet("OrderManager");
-        if (daoTemplate == address(0)) revert TemplateNotSet("DAO");
-        address escrow = Clones.clone(escrowTemplate);
-        address orderManager = Clones.clone(orderManagerTemplate);
-        address dao = Clones.clone(daoTemplate);
-        IOwnmaliProject.ProjectInitParams memory initParams = IOwnmaliProject.ProjectInitParams({
-            name: params.name,
-            symbol: params.symbol,
-            maxSupply: params.maxSupply,
-            tokenPrice: params.tokenPrice,
-            cancelDelay: params.cancelDelay,
-            projectOwner: msg.sender,
-            factory: address(this),
-            companyId: params.companyId,
-            assetId: params.assetId,
-            metadataCID: params.metadataCID,
-            assetType: params.assetType,
-            legalMetadataCID: params.legalMetadataCID,
-            chainId: params.chainId,
-            dividendPct: params.dividendPct,
-            premintAmount: params.premintAmount,
-            minInvestment: params.minInvestment,
-            maxInvestment: params.maxInvestment,
-            eoiCid: params.eoiPct,
-            identityRegistry: identityRegistry,
-            compliance: compliance
+        emit TemplateSet(templateType, template);
+    }
+
+    /// @notice Sets the maximum number of projects
+    /// @param _maxProjects New maximum number of projects
+    function setMaxProjects(uint256 _maxProjects) external onlyRole(ADMIN_ROLE) {
+        if (_maxProjects == 0) revert InvalidParameter("maxProjects", "must be non-zero");
+        maxProjects = _maxProjects;
+        emit MaxProjectsSet(_maxProjects);
+    }
+
+    /// @notice Creates a new project with associated contracts, ensuring one project per company
+    /// @param params Project initialization parameters
+    /// @return projectAddress Address of the deployed project contract
+    /// @return escrowAddress Address of the deployed escrow contract
+    /// @return orderManagerAddress Address of the deployed order manager contract
+    /// @return daoAddress Address of the deployed DAO contract
+    function createProject(OwnmaliProject.ProjectInitParams memory _params)
+        external
+        onlyRole(FACTORY_MANAGER_ROLE)
+        whenNotPaused
+        nonReentrant
+        returns (address projectAddress, address escrowAddress, address orderManagerAddress, address daoAddress)
+    {
+        if (projectCount >= maxProjects) revert MaxProjectsExceeded(projectCount, maxProjects);
+        if (projectTemplate == address(0)) revert TemplateNotSet("project");
+        if (escrowTemplate == address(0)) revert TemplateNotSet("escrow");
+        if (orderManagerTemplate == address(0)) revert TemplateNotSet("orderManager");
+        if (daoTemplate == address(0)) revert TemplateNotSet("dao");
+        if (companyToProject[_params.companyId] != bytes32(0)) {
+            revert CompanyHasProject(_params.companyId, companyToProject[_params.companyId]);
+        }
+        _validateProjectParams(_params);
+
+        // Deploy project contract
+        projectAddress = Clones.clone(projectTemplate);
+        try OwnmaliProject(projectAddress).initialize(abi.encode(_params)) {
+            projectCount++;
+        } catch {
+            revert InitializationFailed("project");
+        }
+
+        // Deploy escrow contract
+        escrowAddress = Clones.clone(escrowTemplate);
+        try IOwnmaliEscrow(escrowAddress).initialize(_params.projectOwner, projectAddress, _params.companyId, _params.assetId) {
+        } catch {
+            revert InitializationFailed("escrow");
+        }
+
+        // Deploy order manager contract
+        orderManagerAddress = Clones.clone(orderManagerTemplate);
+        try IOwnmaliOrderManager(orderManagerAddress).initialize(escrowAddress, projectAddress, _params.projectOwner) {
+        } catch {
+            revert InitializationFailed("orderManager");
+        }
+
+        // Deploy DAO contract
+        daoAddress = Clones.clone(daoTemplate);
+        try IOwnmaliDAO(daoAddress).initialize(_params.projectOwner, projectAddress, _params.companyId, _params.assetId) {
+        } catch {
+            revert InitializationFailed("dao");
+        }
+
+        // Set project contracts and premint tokens
+        try OwnmaliProject(projectAddress).setProjectContractsAndPreMint(
+            escrowAddress,
+            orderManagerAddress,
+            daoAddress,
+            _params.premintAmount
+        ) {
+        } catch {
+            revert InitializationFailed("project contracts");
+        }
+
+        projects[_params.assetId] = ProjectContracts({
+            project: projectAddress,
+            escrow: escrowAddress,
+            orderManager: orderManagerAddress,
+            dao: daoAddress
         });
-        IOwnmaliProject(project).initialize(initParams);
-        IOwnmaliEscrow(escrow).initialize(project, msg.sender);
-        IOwnmaliOrderManager(orderManager).initialize(project, msg.sender);
-        IOwnmaliDAO(dao).initialize(project, msg.sender, 7 days, 1e18, 51);
-        IOwnmaliProject(project).setProjectContractsAndPreMint(escrow, orderManager, dao, params.premintAmount);
-        IOwnmaliRegistry(registry).registerProject(
-            params.companyId,
-            params.assetId,
-            params.name,
-            params.assetType,
-            project,
-            params.metadataCID
-        );
-        projects[params.assetId] = project;
-        emit ProjectCreated(params.companyId, params.assetId, project, escrow, orderManager, dao);
-    }
+        companyToProject[_params.companyId] = _params.assetId;
 
-    /// @notice Updates the registry address
-    function setRegistry(address _registry) external onlyRole(ADMIN_ROLE) {
-        if (_registry == address(0)) revert InvalidAddress(_registry);
-        registry = _registry;
-        emit RegistrySet(_registry);
-    }
+        emit ProjectCreated(_params.companyId, _params.assetId, projectAddress, escrowAddress, orderManagerAddress, daoAddress);
 
-    /// @notice Updates the identity registry address
-    function setIdentityRegistry(address _identityRegistry) external onlyRole(ADMIN_ROLE) {
-        if (_identityRegistry == address(0)) revert InvalidAddress(_identityRegistry);
-        identityRegistry = _identityRegistry;
-        emit IdentityRegistrySet(_identityRegistry);
-    }
-
-    /// @notice Updates the compliance address
-    function setCompliance(address _compliance) external onlyRole(ADMIN_ROLE) {
-        if (_compliance == address(0)) revert InvalidAddress(_compliance);
-        compliance = _compliance;
-        emit ComplianceSet(_compliance);
+        return (projectAddress, escrowAddress, orderManagerAddress, daoAddress);
     }
 
     /// @notice Pauses the contract
@@ -291,10 +218,66 @@ contract OwnmaliFactory is
     }
 
     /*//////////////////////////////////////////////////////////////
-                         EXTERNAL VIEW FUNCTIONS
+                           EXTERNAL VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-    /// @notice Gets the project address for an asset ID
-    function getProject(bytes32 assetId) external view returns (address) {
+
+    /// @notice Returns project contracts for an asset ID
+    /// @param assetId Asset identifier
+    /// @return ProjectContracts struct
+    function getProjectContracts(bytes32 assetId) external view returns (ProjectContracts memory) {
+        if (projects[assetId].project == address(0)) revert InvalidParameter("assetId", "project not found");
         return projects[assetId];
+    }
+
+    /// @notice Returns the asset ID for a company
+    /// @param companyId Company identifier
+    /// @return Asset ID associated with the company
+    function getCompanyProject(bytes32 companyId) external view returns (bytes32) {
+        if (companyToProject[companyId] == bytes32(0)) revert InvalidParameter("companyId", "no project found");
+        return companyToProject[companyId];
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           INTERNAL FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Validates project initialization parameters
+    /// @param params Project initialization parameters
+    function _validateProjectParams(OwnmaliProject.ProjectInitParams memory params) internal view {
+        params.companyId.validateId("companyId");
+        params.assetId.validateId("assetId");
+        params.name.validateString("name", 1, 100);
+        params.symbol.validateString("symbol", 1, 10);
+        params.metadataCID.validateCID("metadataCID");
+        params.legalMetadataCID.validateCID("legalMetadataCID");
+        if (params.projectOwner == address(0)) revert InvalidAddress(params.projectOwner, "projectOwner");
+        if (params.factory == address(0)) revert InvalidAddress(params.factory, "factory");
+        if (params.identityRegistry == address(0)) revert InvalidAddress(params.identityRegistry, "identityRegistry");
+        if (params.compliance == address(0)) revert InvalidAddress(params.compliance, "compliance");
+        if (params.maxSupply == 0) revert InvalidParameter("maxSupply", "must be non-zero");
+        if (params.tokenPrice == 0) revert InvalidParameter("tokenPrice", "must be non-zero");
+        if (params.cancelDelay == 0) revert InvalidParameter("cancelDelay", "must be non-zero");
+        if (params.dividendPct > 50) revert InvalidParameter("dividendPct", "must not exceed 50");
+        if (params.premintAmount > params.maxSupply) revert InvalidParameter("premintAmount", "exceeds maxSupply");
+        if (params.minInvestment == 0) revert InvalidParameter("minInvestment", "must be non-zero");
+        if (params.maxInvestment < params.minInvestment) {
+            revert InvalidParameter("maxInvestment", "must be at least minInvestment");
+        }
+        if (params.chainId == 0) revert InvalidParameter("chainId", "must be non-zero");
+        if (params.eoiPct > 50) revert InvalidParameter("eoiPct", "must not exceed 50");
+        if (
+            params.assetType != bytes32("Commercial") &&
+            params.assetType != bytes32("Residential") &&
+            params.assetType != bytes32("Holiday") &&
+            params.assetType != bytes32("Land")
+        ) revert InvalidAssetType(params.assetType);
+    }
+
+    /// @notice Authorizes contract upgrades
+    /// @param newImplementation Address of the new implementation contract
+    function _authorizeUpgrade(address newImplementation) internal override onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (newImplementation == address(0) || newImplementation.code.length == 0) {
+            revert InvalidAddress(newImplementation, "newImplementation");
+        }
     }
 }
