@@ -15,10 +15,10 @@ import "./Ownmali_FinancialLedger.sol";
 import "./Ownmali_OrderManager.sol";
 import "./Ownmali_SPVDAO.sol";
 
-/// @title OwnmaliSPVFactory
+/// @title OwnmaliFactory
 /// @notice Factory contract for deploying tokenized asset projects for SPVs in the Ownmali ecosystem, with one asset per SPV
 /// @dev Uses Clones for gas-efficient deployment of asset, asset manager, financial ledger, order manager, and SPV DAO contracts
-contract OwnmaliSPVFactory is
+contract OwnmaliFactory is
     Initializable,
     UUPSUpgradeable,
     AccessControlUpgradeable,

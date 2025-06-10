@@ -4,8 +4,14 @@ pragma solidity 0.8.30;
 /// @title IOwnmaliSPV
 /// @notice Interface for OwnmaliSPV contract
 interface IOwnmaliSPV {
-    function balanceOf(address account) external view returns (uint256);
-    function totalSupply() external view returns (uint256);
+    function updateMetadata(bytes32 newMetadataCID) external;
+    function updateKycStatus(bool _kycStatus) external;
+    function updateOwner(address newOwner) external;
+    function setRegistry(address _registry) external;
+    function updateAssetDescription(string calldata newAssetDescription) external;
+    function updateSPVPurpose(string calldata newSpvPurpose) external;
+    function grantInvestorRole(address investor) external;
+    function revokeInvestorRole(address investor) external;
     function getDetails() external view returns (
         string memory spvName,
         bool kycStatus,
@@ -15,9 +21,11 @@ interface IOwnmaliSPV {
         string memory assetDescription,
         string memory spvPurpose
     );
-    function updateMetadata(bytes32 newMetadataCID) external;
-    function updateAssetDescription(string calldata newAssetDescription) external;
-    function updateSPVPurpose(string calldata newSpvPurpose) external;
-    function updateOwner(address newOwner) external;
-    function updateKycStatus(bool _kycStatus) external;
+    function getInvestorDetails() external view returns (
+        string memory spvName,
+        string memory assetDescription,
+        string memory spvPurpose
+    );
+    function pause() external;
+    function unpause() external;
 }

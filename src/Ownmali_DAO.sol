@@ -7,10 +7,10 @@ import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Pau
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "./interfaces/IOwnmaliSPV.sol";
 
-/// @title OwnmaliSPVDAO
+/// @title OwnmaliDAO
 /// @notice Governance contract for Ownmali SPV, allowing token holders to create and vote on SPV-specific proposals
 /// @dev Uses ERC-3643 compliant tokens for voting weight and interacts with OwnmaliSPV contract
-contract OwnmaliSPVDAO is
+contract OwnmaliDAO is
     Initializable,
     AccessControlUpgradeable,
     PausableUpgradeable,
