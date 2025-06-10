@@ -8,7 +8,7 @@ import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Pau
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import "./Ownmali_Validation.sol";
-import "./Ownmali_Company.sol";
+import "./Ownmali_SVP.sol;
 
 /// @title OwnmaliRegistry
 /// @notice Registry contract for managing company and project metadata in the Ownmali ecosystem

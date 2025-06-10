@@ -9,15 +9,16 @@ import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/ut
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import "./Ownmali_Interfaces.sol";
 import "./Ownmali_Validation.sol";
-import "./Ownmali_Project.sol";
-import "./Ownmali_Escrow.sol";
+import "./Ownmali_Asset.sol";
+import "./Ownmali_AssetManager.sol";
+import "./Ownmali_FinancialLedger.sol";
 import "./Ownmali_OrderManager.sol";
-import "./Ownmali_DAO.sol";
+import "./Ownmali_SPVDAO.sol";
 
-/// @title OwnmaliFactory
-/// @notice Factory contract for deploying tokenized asset projects in the Ownmali ecosystem, with one project per company
-/// @dev Uses Clones for gas-efficient deployment of project, escrow, order manager, and DAO contracts
-contract OwnmaliFactory is
+/// @title OwnmaliSPVFactory
+/// @notice Factory contract for deploying tokenized asset projects for SPVs in the Ownmali ecosystem, with one asset per SPV
+/// @dev Uses Clones for gas-efficient deployment of asset, asset manager, financial ledger, order manager, and SPV DAO contracts
+contract OwnmaliSPVFactory is
     Initializable,
     UUPSUpgradeable,
     AccessControlUpgradeable,
@@ -33,18 +34,19 @@ contract OwnmaliFactory is
     error InvalidParameter(string parameter, string reason);
     error TemplateNotSet(string templateType);
     error InitializationFailed(string contractType);
-    error MaxProjectsExceeded(uint256 current, uint256 max);
+    error MaxAssetsExceeded(uint256 current, uint256 max);
     error InvalidAssetType(bytes32 assetType);
-    error CompanyHasProject(bytes32 companyId, bytes32 existingAssetId);
+    error SPVHasAsset(bytes32 spvId, bytes32 existingAssetId);
 
     /*//////////////////////////////////////////////////////////////
                            TYPE DECLARATIONS
     //////////////////////////////////////////////////////////////*/
-    struct ProjectContracts {
-        address project;
-        address escrow;
+    struct AssetContracts {
+        address asset;
+        address assetManager;
+        address financialLedger;
         address orderManager;
-        address dao;
+        address spvDao;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -53,28 +55,30 @@ contract OwnmaliFactory is
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant FACTORY_MANAGER_ROLE = keccak256("FACTORY_MANAGER_ROLE");
 
-    uint256 public maxProjects;
-    address public projectTemplate;
-    address public escrowTemplate;
+    uint256 public maxAssets;
+    address public assetTemplate;
+    address public assetManagerTemplate;
+    address public financialLedgerTemplate;
     address public orderManagerTemplate;
-    address public daoTemplate;
-    mapping(bytes32 => ProjectContracts) public projects;
-    mapping(bytes32 => bytes32) public companyToProject; // Maps companyId to its single assetId
-    uint256 public projectCount;
+    address public spvDaoTemplate;
+    mapping(bytes32 => AssetContracts) public assets;
+    mapping(bytes32 => bytes32) public spvToAsset; // Maps spvId to its single assetId
+    uint256 public assetCount;
 
     /*//////////////////////////////////////////////////////////////
                              EVENTS
     //////////////////////////////////////////////////////////////*/
-    event ProjectCreated(
-        bytes32 indexed companyId,
+    event AssetCreated(
+        bytes32 indexed spvId,
         bytes32 indexed assetId,
-        address indexed project,
-        address escrow,
+        address indexed asset,
+        address assetManager,
+        address financialLedger,
         address orderManager,
-        address dao
+        address spvDao
     );
     event TemplateSet(string templateType, address indexed template);
-    event MaxProjectsSet(uint256 newMax);
+    event MaxAssetsSet(uint256 newMax);
 
     /*//////////////////////////////////////////////////////////////
                            INITIALIZATION
@@ -90,14 +94,14 @@ contract OwnmaliFactory is
         __Pausable_init();
         __ReentrancyGuard_init();
 
-        maxProjects = 1000;
+        maxAssets = 1000;
 
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(ADMIN_ROLE, _admin);
         _grantRole(FACTORY_MANAGER_ROLE, _admin);
         _setRoleAdmin(FACTORY_MANAGER_ROLE, ADMIN_ROLE);
 
-        emit MaxProjectsSet(maxProjects);
+        emit MaxAssetsSet(maxAssets);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -105,106 +109,159 @@ contract OwnmaliFactory is
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Sets the template for a contract type
-    /// @param templateType Type of template ("project", "escrow", "orderManager", "dao")
+    /// @param templateType Type of template ("asset", "assetManager", "financialLedger", "orderManager", "spvDao")
     /// @param template Address of the template contract
     function setTemplate(string memory templateType, address template) external onlyRole(ADMIN_ROLE) {
         if (template == address(0) || template.code.length == 0) revert InvalidAddress(template, templateType);
-        if (keccak256(abi.encodePacked(templateType)) == keccak256(abi.encodePacked("project"))) {
-            projectTemplate = template;
-        } else if (keccak256(abi.encodePacked(templateType)) == keccak256(abi.encodePacked("escrow"))) {
-            escrowTemplate = template;
-        } else if (keccak256(abi.encodePacked(templateType)) == keccak256(abi.encodePacked("orderManager"))) {
+        bytes32 templateTypeHash = keccak256(abi.encodePacked(templateType));
+        if (templateTypeHash == keccak256(abi.encodePacked("asset"))) {
+            assetTemplate = template;
+        } else if (templateTypeHash == keccak256(abi.encodePacked("assetManager"))) {
+            assetManagerTemplate = template;
+        } else if (templateTypeHash == keccak256(abi.encodePacked("financialLedger"))) {
+            financialLedgerTemplate = template;
+        } else if (templateTypeHash == keccak256(abi.encodePacked("orderManager"))) {
             orderManagerTemplate = template;
-        } else if (keccak256(abi.encodePacked(templateType)) == keccak256(abi.encodePacked("dao"))) {
-            daoTemplate = template;
+        } else if (templateTypeHash == keccak256(abi.encodePacked("spvDao"))) {
+            spvDaoTemplate = template;
         } else {
             revert InvalidParameter("templateType", "invalid type");
         }
         emit TemplateSet(templateType, template);
     }
 
-    /// @notice Sets the maximum number of projects
-    /// @param _maxProjects New maximum number of projects
-    function setMaxProjects(uint256 _maxProjects) external onlyRole(ADMIN_ROLE) {
-        if (_maxProjects == 0) revert InvalidParameter("maxProjects", "must be non-zero");
-        maxProjects = _maxProjects;
-        emit MaxProjectsSet(_maxProjects);
+    /// @notice Sets the maximum number of assets
+    /// @param _maxAssets New maximum number of assets
+    function setMaxAssets(uint256 _maxAssets) external onlyRole(ADMIN_ROLE) {
+        if (_maxAssets == 0) revert InvalidParameter("maxAssets", "must be non-zero");
+        maxAssets = _maxAssets;
+        emit MaxAssetsSet(_maxAssets);
     }
 
-    /// @notice Creates a new project with associated contracts, ensuring one project per company
-    /// @param params Project initialization parameters
-    /// @return projectAddress Address of the deployed project contract
-    /// @return escrowAddress Address of the deployed escrow contract
+    /// @notice Creates a new asset with associated contracts for an SPV, ensuring one asset per SPV
+    /// @param params Asset initialization parameters
+    /// @return assetAddress Address of the deployed asset contract
+    /// @return assetManagerAddress Address of the deployed asset manager contract
+    /// @return financialLedgerAddress Address of the deployed financial ledger contract
     /// @return orderManagerAddress Address of the deployed order manager contract
-    /// @return daoAddress Address of the deployed DAO contract
-    function createProject(OwnmaliProject.ProjectInitParams memory _params)
+    /// @return spvDaoAddress Address of the deployed SPV DAO contract
+    function createAsset(OwnmaliAsset.AssetInitParams memory params)
         external
         onlyRole(FACTORY_MANAGER_ROLE)
         whenNotPaused
         nonReentrant
-        returns (address projectAddress, address escrowAddress, address orderManagerAddress, address daoAddress)
+        returns (
+            address assetAddress,
+            address assetManagerAddress,
+            address financialLedgerAddress,
+            address orderManagerAddress,
+            address spvDaoAddress
+        )
     {
-        if (projectCount >= maxProjects) revert MaxProjectsExceeded(projectCount, maxProjects);
-        if (projectTemplate == address(0)) revert TemplateNotSet("project");
-        if (escrowTemplate == address(0)) revert TemplateNotSet("escrow");
+        if (assetCount >= maxAssets) revert MaxAssetsExceeded(assetCount, maxAssets);
+        if (assetTemplate == address(0)) revert TemplateNotSet("asset");
+        if (assetManagerTemplate == address(0)) revert TemplateNotSet("assetManager");
+        if (financialLedgerTemplate == address(0)) revert TemplateNotSet("financialLedger");
         if (orderManagerTemplate == address(0)) revert TemplateNotSet("orderManager");
-        if (daoTemplate == address(0)) revert TemplateNotSet("dao");
-        if (companyToProject[_params.companyId] != bytes32(0)) {
-            revert CompanyHasProject(_params.companyId, companyToProject[_params.companyId]);
+        if (spvDaoTemplate == address(0)) revert TemplateNotSet("spvDao");
+        if (spvToAsset[params.spvId] != bytes32(0)) {
+            revert SPVHasAsset(params.spvId, spvToAsset[params.spvId]);
         }
-        _validateProjectParams(_params);
+        _validateAssetParams(params);
 
-        // Deploy project contract
-        projectAddress = Clones.clone(projectTemplate);
-        try OwnmaliProject(projectAddress).initialize(abi.encode(_params)) {
-            projectCount++;
+        // Deploy asset contract
+        assetAddress = Clones.clone(assetTemplate);
+        try OwnmaliAsset(assetAddress).initialize(params) {
+            assetCount++;
         } catch {
-            revert InitializationFailed("project");
+            revert InitializationFailed("asset");
         }
 
-        // Deploy escrow contract
-        escrowAddress = Clones.clone(escrowTemplate);
-        try IOwnmaliEscrow(escrowAddress).initialize(_params.projectOwner, projectAddress, _params.companyId, _params.assetId) {
+        // Deploy asset manager contract
+        assetManagerAddress = Clones.clone(assetManagerTemplate);
+        try OwnmaliAssetManager(assetManagerAddress).initialize(
+            params.projectOwner,
+            assetAddress,
+            params.spvId,
+            params.assetId
+        ) {
         } catch {
-            revert InitializationFailed("escrow");
+            revert InitializationFailed("assetManager");
+        }
+
+        // Deploy financial ledger contract
+        financialLedgerAddress = Clones.clone(financialLedgerTemplate);
+        try OwnmaliFinancialLedger(financialLedgerAddress).initialize(
+            params.projectOwner,
+            assetAddress,
+            params.spvId,
+            params.assetId
+        ) {
+        } catch {
+            revert InitializationFailed("financialLedger");
         }
 
         // Deploy order manager contract
         orderManagerAddress = Clones.clone(orderManagerTemplate);
-        try IOwnmaliOrderManager(orderManagerAddress).initialize(escrowAddress, projectAddress, _params.projectOwner) {
+        try IOwnmaliOrderManager(orderManagerAddress).initialize(
+            financialLedgerAddress,
+            assetAddress,
+            params.projectOwner
+        ) {
         } catch {
             revert InitializationFailed("orderManager");
         }
 
-        // Deploy DAO contract
-        daoAddress = Clones.clone(daoTemplate);
-        try IOwnmaliDAO(daoAddress).initialize(_params.projectOwner, projectAddress, _params.companyId, _params.assetId) {
-        } catch {
-            revert InitializationFailed("dao");
-        }
-
-        // Set project contracts and premint tokens
-        try OwnmaliProject(projectAddress).setProjectContractsAndPreMint(
-            escrowAddress,
-            orderManagerAddress,
-            daoAddress,
-            _params.premintAmount
+        // Deploy SPV DAO contract
+        spvDaoAddress = Clones.clone(spvDaoTemplate);
+        try IOwnmaliSPVDAO(spvDaoAddress).initialize(
+            params.projectOwner,
+            assetAddress,
+            params.spvId,
+            params.assetId
         ) {
         } catch {
-            revert InitializationFailed("project contracts");
+            revert InitializationFailed("spvDao");
         }
 
-        projects[_params.assetId] = ProjectContracts({
-            project: projectAddress,
-            escrow: escrowAddress,
+        // Set asset contracts and premint tokens
+        try OwnmaliAsset(assetAddress).setAssetContractsAndPreMint(
+            assetManagerAddress,
+            financialLedgerAddress,
+            orderManagerAddress,
+            spvDaoAddress,
+            params.premintAmount
+        ) {
+        } catch {
+            revert InitializationFailed("asset contracts");
+        }
+
+        assets[params.assetId] = AssetContracts({
+            asset: assetAddress,
+            assetManager: assetManagerAddress,
+            financialLedger: financialLedgerAddress,
             orderManager: orderManagerAddress,
-            dao: daoAddress
+            spvDao: spvDaoAddress
         });
-        companyToProject[_params.companyId] = _params.assetId;
+        spvToAsset[params.spvId] = params.assetId;
 
-        emit ProjectCreated(_params.companyId, _params.assetId, projectAddress, escrowAddress, orderManagerAddress, daoAddress);
+        emit AssetCreated(
+            params.spvId,
+            params.assetId,
+            assetAddress,
+            assetManagerAddress,
+            financialLedgerAddress,
+            orderManagerAddress,
+            spvDaoAddress
+        );
 
-        return (projectAddress, escrowAddress, orderManagerAddress, daoAddress);
+        return (
+            assetAddress,
+            assetManagerAddress,
+            financialLedgerAddress,
+            orderManagerAddress,
+            spvDaoAddress
+        );
     }
 
     /// @notice Pauses the contract
@@ -221,30 +278,30 @@ contract OwnmaliFactory is
                            EXTERNAL VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Returns project contracts for an asset ID
+    /// @notice Returns asset contracts for an asset ID
     /// @param assetId Asset identifier
-    /// @return ProjectContracts struct
-    function getProjectContracts(bytes32 assetId) external view returns (ProjectContracts memory) {
-        if (projects[assetId].project == address(0)) revert InvalidParameter("assetId", "project not found");
-        return projects[assetId];
+    /// @return AssetContracts struct
+    function getAssetContracts(bytes32 assetId) external view returns (AssetContracts memory) {
+        if (assets[assetId].asset == address(0)) revert InvalidParameter("assetId", "asset not found");
+        return assets[assetId];
     }
 
-    /// @notice Returns the asset ID for a company
-    /// @param companyId Company identifier
-    /// @return Asset ID associated with the company
-    function getCompanyProject(bytes32 companyId) external view returns (bytes32) {
-        if (companyToProject[companyId] == bytes32(0)) revert InvalidParameter("companyId", "no project found");
-        return companyToProject[companyId];
+    /// @notice Returns the asset ID for an SPV
+    /// @param spvId SPV identifier
+    /// @return Asset ID associated with the SPV
+    function getSPVAsset(bytes32 spvId) external view returns (bytes32) {
+        if (spvToAsset[spvId] == bytes32(0)) revert InvalidParameter("spvId", "no asset found");
+        return spvToAsset[spvId];
     }
 
     /*//////////////////////////////////////////////////////////////
                            INTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Validates project initialization parameters
-    /// @param params Project initialization parameters
-    function _validateProjectParams(OwnmaliProject.ProjectInitParams memory params) internal view {
-        params.companyId.validateId("companyId");
+    /// @notice Validates asset initialization parameters
+    /// @param params Asset initialization parameters
+    function _validateAssetParams(OwnmaliAsset.AssetInitParams memory params) internal view {
+        params.spvId.validateId("spvId");
         params.assetId.validateId("assetId");
         params.name.validateString("name", 1, 100);
         params.symbol.validateString("symbol", 1, 10);
@@ -270,7 +327,9 @@ contract OwnmaliFactory is
             params.assetType != bytes32("Residential") &&
             params.assetType != bytes32("Holiday") &&
             params.assetType != bytes32("Land")
-        ) revert InvalidAssetType(params.assetType);
+        ) {
+            revert InvalidAssetType(params.assetType);
+        }
     }
 
     /// @notice Authorizes contract upgrades
