@@ -12,7 +12,6 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {TrexToken} from "@tokenysolutions/t-rex/token/IToken.sol";
 import {IModularCompliance} from "@tokenysolutions/t-rex/compliance/modular/IModularCompliance.sol";
 import {IIdentityRegistry} from "@tokenysolutions/t-rex/registry/interface/IIdentityRegistry.sol";
-import "./Ownmali_Interfaces.sol";
 import "./Ownmali_Validation.sol";
 
 /// @title OwnmaliAsset
