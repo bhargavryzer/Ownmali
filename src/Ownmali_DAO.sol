@@ -5,7 +5,7 @@ import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Ini
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
-import "./interfaces/IOwnmaliSPV.sol";
+import "./Interfaces/IOwnmaliSPV.sol";
 
 /// @title OwnmaliDAO
 /// @notice Governance contract for Ownmali SPV, allowing token holders to create and vote on SPV-specific proposals
@@ -173,14 +173,14 @@ contract OwnmaliDAO is
     /// @notice Votes on a proposal
     /// @param proposalId Proposal ID
     /// @param inSupport True for supporting, false for opposing
-    function vote(uint256 proposalId, bool inSupport) external nonReentrant whenNotPaused {
+    function vote(uint256 proposalId, bool inSupport,uint256 userBalance) external nonReentrant whenNotPaused {
         if (proposalId >= proposalCount) revert InvalidProposalId(proposalId);
         Proposal storage proposal = proposals[proposalId];
         if (proposal.status != ProposalStatus.Pending) revert ProposalNotActive(proposalId);
         if (block.timestamp > proposal.votingEnd) revert VotingPeriodEnded(proposalId);
         if (proposal.hasVoted[msg.sender]) revert AlreadyVoted(msg.sender, proposalId);
 
-        uint256 voterBalance = IOwnmaliSPV(spv).balanceOf(msg.sender);
+        uint256 voterBalance = userBalance;
         if (voterBalance < minimumVotingPower) revert InsufficientVotingPower(msg.sender, voterBalance);
 
         proposal.hasVoted[msg.sender] = true;

@@ -4,11 +4,12 @@ pragma solidity 0.8.30;
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
 import "./Ownmali_Validation.sol";
 
-/// @title SPV
-/// @notice Manages Special Purpose Vehicle (SPV) metadata, assets, and ownership
-/// @dev Upgradeable contract with role-based access control and pausing
+/// @title OwnmaliSPV
+/// @notice Manages a Special Purpose Vehicle for holding and distributing assets
+/// @dev Upgradeable contract with role-based access control, pausing, and asset management
 contract OwnmaliSPV is Initializable, AccessControlUpgradeable, PausableUpgradeable {
     using OwnmaliValidation for *;
 
@@ -17,70 +18,179 @@ contract OwnmaliSPV is Initializable, AccessControlUpgradeable, PausableUpgradea
     bytes32 public constant INVESTOR_ROLE = keccak256("INVESTOR_ROLE");
 
     // SPV data
-    string public spvName;
-    bool public kycStatus;
-    string public countryCode;
-    bytes32 public metadataCID;
-    address public owner;
-    address public registry;
-    string public assetDescription; // Description of assets held by SPV
-    string public spvPurpose; // Purpose of the SPV (e.g., real estate, debt securitization)
+    string public spvName; // Name of the SPV
+    bool public kycStatus; // KYC status for compliance
+    string public countryCode; // ISO 3166-1 alpha-2 code for country
+    bytes32 public metadataCID; // IPFS CID for SPV metadata (e.g., purpose, legal docs)
+    address public manager; // SPV manager
+    address public registry; // Registry contract for compliance
+    address public assetToken; // ERC-20 token or asset managed by SPV
+    uint256 public totalAssets; // Total assets held (in assetToken units or ETH)
+
+    // Struct for initialization parameters
+    struct InitParams {
+        string spvName;
+        bool kycStatus;
+        string countryCode;
+        bytes32 metadataCID;
+        address manager;
+        address registry;
+        address assetToken;
+    }
 
     // Events
     event SPVMetadataUpdated(bytes32 oldCID, bytes32 newCID);
     event SPVKycStatusUpdated(bool kycStatus);
-    event SPVOwnerUpdated(address oldOwner, address newOwner);
+    event SPVManagerUpdated(address oldManager, address newManager);
     event RegistryUpdated(address oldRegistry, address newRegistry);
-    event AssetDescriptionUpdated(string oldDescription, string newDescription);
-    event SPVPurposeUpdated(string oldPurpose, string newPurpose);
+    event AssetsDeposited(address indexed depositor, uint256 amount);
+    event AssetsWithdrawn(address indexed recipient, uint256 amount);
+    event InvestorAdded(address indexed investor);
+    event InvestorRemoved(address indexed investor);
+    event ProfitsDistributed(address indexed investor, uint256 amount);
 
     // Errors
     error InvalidAddress(address addr);
     error InvalidParameter(string parameter);
     error Unauthorized(address caller);
+    error InsufficientAssets(uint256 requested, uint256 available);
+    error AssetTransferFailed(address token, address to, uint256 amount);
 
     /// @notice Initializes the SPV contract
-    /// @param _spvName SPV name (1-100 characters)
-    /// @param _kycStatus KYC verification status
-    /// @param _countryCode ISO 3166-1 alpha-2 country code
-    /// @param _metadataCID IPFS CID for SPV metadata
-    /// @param _owner SPV owner address
-    /// @param _registry Registry contract address
-    /// @param _assetDescription Description of assets held by the SPV
-    /// @param _spvPurpose Purpose of the SPV
-    function initialize(
-        string calldata _spvName,
-        bool _kycStatus,
-        string calldata _countryCode,
-        bytes32 _metadataCID,
-        address _owner,
-        address _registry,
-        string calldata _assetDescription,
-        string calldata _spvPurpose
-    ) external initializer {
-        if (_owner == address(0)) revert InvalidAddress(_owner);
-        if (_registry == address(0)) revert InvalidAddress(_registry);
-        _spvName.validateString("spvName", 1, 100);
-        _countryCode.validateString("countryCode", 2, 2);
-        _metadataCID.validateCID("metadataCID");
-        _assetDescription.validateString("assetDescription", 1, 500);
-        _spvPurpose.validateString("spvPurpose", 1, 200);
+    /// @param params Initialization parameters
+    function initialize(InitParams calldata params) external initializer {
+        // Validate addresses
+        if (params.manager == address(0)) revert InvalidAddress(params.manager);
+        if (params.registry == address(0)) revert InvalidAddress(params.registry);
 
+        // Validate inputs
+        params.spvName.validateString("spvName", 1, 100);
+        params.countryCode.validateString("countryCode", 2, 2);
+        params.metadataCID.validateCID("metadataCID");
+
+        // Initialize inherited contracts
         __AccessControl_init();
         __Pausable_init();
 
-        spvName = _spvName;
-        kycStatus = _kycStatus;
-        countryCode = _countryCode;
-        metadataCID = _metadataCID;
-        owner = _owner;
-        registry = _registry;
-        assetDescription = _assetDescription;
-        spvPurpose = _spvPurpose;
+        // Set state variables
+        spvName = params.spvName;
+        kycStatus = params.kycStatus;
+        countryCode = params.countryCode;
+        metadataCID = params.metadataCID;
+        manager = params.manager;
+        registry = params.registry;
+        assetToken = params.assetToken;
+        totalAssets = 0;
 
+        // Set roles
+        _setupRoles(params.registry, params.manager);
+    }
+
+    /// @notice Internal function to set up roles during initialization
+    /// @param _registry Registry address
+    /// @param _manager Manager address
+    function _setupRoles(address _registry, address _manager) internal {
         _grantRole(DEFAULT_ADMIN_ROLE, _registry);
         _grantRole(SPV_ADMIN_ROLE, _registry);
-        _grantRole(SPV_ADMIN_ROLE, _owner);
+        _grantRole(SPV_ADMIN_ROLE, _manager);
+    }
+
+    /// @notice Deposits assets (ETH or ERC-20 tokens) into the SPV
+    /// @param amount Amount of assets to deposit
+    function depositAssets(uint256 amount) external payable whenNotPaused {
+        if (!hasRole(INVESTOR_ROLE, msg.sender) && !hasRole(SPV_ADMIN_ROLE, msg.sender)) {
+            revert Unauthorized(msg.sender);
+        }
+        if (amount == 0) revert InvalidParameter("amount");
+
+        if (assetToken == address(0)) {
+            // Handle ETH deposits
+            if (msg.value != amount) revert InvalidParameter("msg.value");
+            totalAssets += amount;
+        } else {
+            // Handle ERC-20 token deposits
+            if (msg.value != 0) revert InvalidParameter("msg.value");
+            bool success = IERC20Upgradeable(assetToken).transferFrom(msg.sender, address(this), amount);
+            if (!success) revert AssetTransferFailed(assetToken, address(this), amount);
+            totalAssets += amount;
+        }
+
+        emit AssetsDeposited(msg.sender, amount);
+    }
+
+    /// @notice Withdraws assets to a specified address
+    /// @param recipient Address to receive the assets
+    /// @param amount Amount of assets to withdraw
+    function withdrawAssets(address recipient, uint256 amount)
+        external
+        onlyRole(SPV_ADMIN_ROLE)
+        whenNotPaused
+    {
+        if (recipient == address(0)) revert InvalidAddress(recipient);
+        if (amount == 0 || amount > totalAssets) revert InsufficientAssets(amount, totalAssets);
+
+        totalAssets -= amount;
+
+        if (assetToken == address(0)) {
+            // Handle ETH withdrawal
+            (bool success, ) = recipient.call{value: amount}("");
+            if (!success) revert AssetTransferFailed(address(0), recipient, amount);
+        } else {
+            // Handle ERC-20 token withdrawal
+            bool success = IERC20Upgradeable(assetToken).transfer(recipient, amount);
+            if (!success) revert AssetTransferFailed(assetToken, recipient, amount);
+        }
+
+        emit AssetsWithdrawn(recipient, amount);
+    }
+
+    /// @notice Distributes profits to investors
+    /// @param investors List of investor addresses
+    /// @param amounts Corresponding amounts to distribute
+    function distributeProfits(address[] calldata investors, uint256[] calldata amounts)
+        external
+        onlyRole(SPV_ADMIN_ROLE)
+        whenNotPaused
+    {
+        if (investors.length != amounts.length) revert InvalidParameter("array length mismatch");
+        uint256 totalAmount = 0;
+        for (uint256 i = 0; i < amounts.length; i++) {
+            totalAmount += amounts[i];
+        }
+        if (totalAmount > totalAssets) revert InsufficientAssets(totalAmount, totalAssets);
+
+        totalAssets -= totalAmount;
+
+        for (uint256 i = 0; i < investors.length; i++) {
+            if (!hasRole(INVESTOR_ROLE, investors[i])) revert Unauthorized(investors[i]);
+            if (amounts[i] == 0) continue;
+
+            if (assetToken == address(0)) {
+                (bool success, ) = investors[i].call{value: amounts[i]}("");
+                if (!success) revert AssetTransferFailed(address(0), investors[i], amounts[i]);
+            } else {
+                bool success = IERC20Upgradeable(assetToken).transfer(investors[i], amounts[i]);
+                if (!success) revert AssetTransferFailed(assetToken, investors[i], amounts[i]);
+            }
+
+            emit ProfitsDistributed(investors[i], amounts[i]);
+        }
+    }
+
+    /// @notice Adds an investor to the SPV
+    /// @param investor Address of the investor
+    function addInvestor(address investor) external onlyRole(SPV_ADMIN_ROLE) whenNotPaused {
+        if (investor == address(0)) revert InvalidAddress(investor);
+        _grantRole(INVESTOR_ROLE, investor);
+        emit InvestorAdded(investor);
+    }
+
+    /// @notice Removes an investor from the SPV
+    /// @param investor Address of the investor
+    function removeInvestor(address investor) external onlyRole(SPV_ADMIN_ROLE) whenNotPaused {
+        if (investor == address(0)) revert InvalidAddress(investor);
+        _revokeRole(INVESTOR_ROLE, investor);
+        emit InvestorRemoved(investor);
     }
 
     /// @notice Updates SPV metadata CID
@@ -109,21 +219,21 @@ contract OwnmaliSPV is Initializable, AccessControlUpgradeable, PausableUpgradea
         emit SPVKycStatusUpdated(_kycStatus);
     }
 
-    /// @notice Updates SPV owner
-    /// @param newOwner New owner address
-    function updateOwner(address newOwner)
+    /// @notice Updates SPV manager
+    /// @param newManager New manager address
+    function updateManager(address newManager)
         external
         onlyRole(SPV_ADMIN_ROLE)
         whenNotPaused
     {
-        if (newOwner == address(0)) revert InvalidAddress(newOwner);
+        if (newManager == address(0)) revert InvalidAddress(newManager);
 
-        address oldOwner = owner;
-        owner = newOwner;
-        _grantRole(SPV_ADMIN_ROLE, newOwner);
-        _revokeRole(SPV_ADMIN_ROLE, oldOwner);
+        address oldManager = manager;
+        manager = newManager;
+        _grantRole(SPV_ADMIN_ROLE, newManager);
+        _revokeRole(SPV_ADMIN_ROLE, oldManager);
 
-        emit SPVOwnerUpdated(oldOwner, newOwner);
+        emit SPVManagerUpdated(oldManager, newManager);
     }
 
     /// @notice Updates the registry address
@@ -145,60 +255,8 @@ contract OwnmaliSPV is Initializable, AccessControlUpgradeable, PausableUpgradea
         emit RegistryUpdated(oldRegistry, _registry);
     }
 
-    /// @notice Updates asset description
-    /// @param newAssetDescription New description of assets
-    function updateAssetDescription(string calldata newAssetDescription)
-        external
-        onlyRole(SPV_ADMIN_ROLE)
-        whenNotPaused
-    {
-        newAssetDescription.validateString("assetDescription", 1, 500);
-
-        string memory oldDescription = assetDescription;
-        assetDescription = newAssetDescription;
-
-        emit AssetDescriptionUpdated(oldDescription, newAssetDescription);
-    }
-
-    /// @notice Updates SPV purpose
-    /// @param newSpvPurpose New purpose of the SPV
-    function updateSPVPurpose(string calldata newSpvPurpose)
-        external
-        onlyRole(SPV_ADMIN_ROLE)
-        whenNotPaused
-    {
-        newSpvPurpose.validateString("spvPurpose", 1, 200);
-
-        string memory oldPurpose = spvPurpose;
-        spvPurpose = newSpvPurpose;
-
-        emit SPVPurposeUpdated(oldPurpose, newSpvPurpose);
-    }
-
-    /// @notice Grants investor role to an address
-    /// @param investor Address to grant investor role
-    function grantInvestorRole(address investor)
-        external
-        onlyRole(SPV_ADMIN_ROLE)
-        whenNotPaused
-    {
-        if (investor == address(0)) revert InvalidAddress(investor);
-        _grantRole(INVESTOR_ROLE, investor);
-    }
-
-    /// @notice Revokes investor role from an address
-    /// @param investor Address to revoke investor role
-    function revokeInvestorRole(address investor)
-        external
-        onlyRole(SPV_ADMIN_ROLE)
-        whenNotPaused
-    {
-        if (investor == address(0)) revert InvalidAddress(investor);
-        _revokeRole(INVESTOR_ROLE, investor);
-    }
-
     /// @notice Gets SPV details
-    /// @return SPV details (spvName, kycStatus, countryCode, metadataCID, owner, assetDescription, spvPurpose)
+    /// @return SPV details (spvName, kycStatus, countryCode, metadataCID, manager, assetToken, totalAssets)
     function getDetails()
         external
         view
@@ -208,26 +266,11 @@ contract OwnmaliSPV is Initializable, AccessControlUpgradeable, PausableUpgradea
             string memory,
             bytes32,
             address,
-            string memory,
-            string memory
+            address,
+            uint256
         )
     {
-        return (spvName, kycStatus, countryCode, metadataCID, owner, assetDescription, spvPurpose);
-    }
-
-    /// @notice Gets SPV details for investors
-    /// @return SPV details (spvName, assetDescription, spvPurpose)
-    function getInvestorDetails()
-        external
-        view
-        onlyRole(INVESTOR_ROLE)
-        returns (
-            string memory,
-            string memory,
-            string memory
-        )
-    {
-        return (spvName, assetDescription, spvPurpose);
+        return (spvName, kycStatus, countryCode, metadataCID, manager, assetToken, totalAssets);
     }
 
     /// @notice Pauses the contract
@@ -238,5 +281,10 @@ contract OwnmaliSPV is Initializable, AccessControlUpgradeable, PausableUpgradea
     /// @notice Unpauses the contract
     function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _unpause();
+    }
+
+    /// @notice Fallback to prevent accidental ETH transfers
+    receive() external payable {
+        revert InvalidParameter("direct ETH transfer not allowed");
     }
 }
