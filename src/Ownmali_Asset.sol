@@ -11,8 +11,8 @@ import {IIdentityRegistry} from "@tokenysolutions/t-rex/contracts/registry/inter
 import "./Ownmali_Validation.sol";
 
 /// @title OwnmaliAsset
-/// @notice ERC-3643 compliant token for asset tokenization with compliance management
-/// @dev Production-ready contract for tokenizing real-world assets
+/// @notice ERC-3643 compliant token for asset tokenization with premint-only mechanism
+/// @dev Assets are fully tokenized during premint phase, no additional minting or burning allowed
 contract OwnmaliAsset is
     Initializable,
     UUPSUpgradeable,
@@ -35,6 +35,9 @@ contract OwnmaliAsset is
     error UnauthorizedCaller(address caller);
     error TransferNotCompliant(address from, address to, uint256 amount);
     error ExceedsMaxSupply(uint256 amount, uint256 maxSupply);
+    error MintingDisabled();
+    error BurningNotAllowed();
+    error InsufficientBalance(address account, uint256 balance, uint256 required);
 
     /*//////////////////////////////////////////////////////////////
                            TYPE DECLARATIONS
@@ -63,7 +66,6 @@ contract OwnmaliAsset is
         
         // Configuration
         uint16 chainId;
-        uint256 premintAmount;
     }
 
     struct MetadataUpdate {
@@ -77,7 +79,7 @@ contract OwnmaliAsset is
     /*//////////////////////////////////////////////////////////////
                            STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
-    // Role definitions - Only two roles as requested
+    // Role definitions
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
 
@@ -133,9 +135,9 @@ contract OwnmaliAsset is
                            INITIALIZATION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Initializes the asset contract
+    /// @notice Initializes the asset contract (premint handled in child contracts)
     /// @param configData Encoded AssetConfig for initialization
-    function initialize(bytes calldata configData) external initializer {
+    function initialize(bytes calldata configData) external virtual initializer {
         AssetConfig memory config = abi.decode(configData, (AssetConfig));
         _validateConfig(config);
 
@@ -173,11 +175,6 @@ contract OwnmaliAsset is
         _grantRole(ADMIN_ROLE, config.assetOwner);
         _grantRole(OPERATOR_ROLE, config.assetOwner);
         _setRoleAdmin(OPERATOR_ROLE, ADMIN_ROLE);
-
-        // Premint if specified
-        if (config.premintAmount > 0) {
-            _mint(config.assetOwner, config.premintAmount);
-        }
 
         emit ProjectStatusChanged(true);
     }
@@ -276,24 +273,19 @@ contract OwnmaliAsset is
         dividendPct = _dividendPct;
     }
 
-    /// @notice Mints tokens to specified address
-    /// @param to Recipient address
-    /// @param amount Amount to mint
-    function mint(address to, uint256 amount) 
-        external 
-        onlyRole(OPERATOR_ROLE) 
-        whenNotPaused 
-        onlyActiveProject 
-    {
-        if (to == address(0)) revert InvalidAddress(to);
-        if (totalSupply() + amount > maxSupply) {
-            revert ExceedsMaxSupply(totalSupply() + amount, maxSupply);
-        }
-        if (!compliance.canTransfer(address(0), to, amount)) {
-            revert TransferNotCompliant(address(0), to, amount);
-        }
-        
-        _mint(to, amount);
+    /// @notice Minting is disabled - tokens are only created during premint
+    function mint(address, uint256) external pure {
+        revert MintingDisabled();
+    }
+
+    /// @notice Burning is not allowed - tokens represent real-world assets
+    function burn(address, uint256) external pure {
+        revert BurningNotAllowed();
+    }
+
+    /// @notice Burning from is not allowed - tokens represent real-world assets
+    function burnFrom(address, uint256) external pure {
+        revert BurningNotAllowed();
     }
 
     /// @notice Pauses the contract
@@ -328,16 +320,11 @@ contract OwnmaliAsset is
             revert TokensLocked(from, unlockTime[from]);
         }
         
-        // Compliance check for transfers
+        // Compliance check for transfers (not for minting during premint)
         if (from != address(0) && to != address(0)) {
             if (!compliance.canTransfer(from, to, amount)) {
                 revert TransferNotCompliant(from, to, amount);
             }
-        }
-        
-        // Check max supply on minting
-        if (from == address(0) && totalSupply() + amount > maxSupply) {
-            revert ExceedsMaxSupply(totalSupply() + amount, maxSupply);
         }
     }
 
@@ -358,7 +345,6 @@ contract OwnmaliAsset is
         if (config.maxSupply == 0) revert InvalidParameter("maxSupply");
         if (config.tokenPrice == 0) revert InvalidParameter("tokenPrice");
         if (config.dividendPct > MAX_DIVIDEND_PCT) revert InvalidParameter("dividendPct");
-        if (config.premintAmount > config.maxSupply) revert InvalidParameter("premintAmount");
         if (config.chainId == 0) revert InvalidParameter("chainId");
     }
 
@@ -396,8 +382,7 @@ contract OwnmaliAsset is
             factory: factory,
             identityRegistry: address(identityRegistry),
             compliance: address(compliance),
-            chainId: chainId,
-            premintAmount: 0 // Not stored after initialization
+            chainId: chainId
         });
     }
 
