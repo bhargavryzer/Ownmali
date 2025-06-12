@@ -4,9 +4,16 @@ pragma solidity 0.8.30;
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import {IERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
-import "./Interfaces/IOwnmali_Interfaces.sol";
 import "./Ownmali_Validation.sol";
+
+// Interface for IOwnmaliAsset - should be defined separately
+interface IOwnmaliAsset {
+    function mint(address to, uint256 amount) external;
+    function lock(address account, uint256 amount, uint256 unlockTime) external;
+    function unlock(address account, uint256 amount) external;
+}
 
 /// @title AssetManager
 /// @notice Manages token-related operations (minting, transferring, locking, releasing) for an SPV in the Ownmali ecosystem
@@ -15,26 +22,38 @@ contract OwnmaliAssetManager is
     Initializable,
     UUPSUpgradeable,
     PausableUpgradeable,
-    IOwnmaliAssetManager
+    AccessControlUpgradeable
 {
-    using OwnmaliValidation for *;
+    using OwnmaliValidation for bytes32;
 
     /*//////////////////////////////////////////////////////////////
                              ERRORS
     //////////////////////////////////////////////////////////////*/
-    error InvalidAddress(address addr, string parameter);
-    error InvalidAmount(uint256 amount, string parameter);
+    error InvalidAddress(address addr);
+    error InvalidAmount(uint256 amount);
     error UnauthorizedCaller(address caller);
     error TokenOperationFailed(string operation);
+    error InvalidImplementation();
+
+    /*//////////////////////////////////////////////////////////////
+                             EVENTS
+    //////////////////////////////////////////////////////////////*/
+    event OrderManagerSet(address indexed orderManager);
+    event TokenContractSet(address indexed tokenContract);
+    event TokensMinted(address indexed recipient, uint256 amount);
+    event TokensTransferred(address indexed from, address indexed to, uint256 amount);
+    event TokensLocked(address indexed account, uint256 amount);
+    event TokensReleased(address indexed account, uint256 amount);
 
     /*//////////////////////////////////////////////////////////////
                            STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
+    bytes32 public constant ORDER_MANAGER_ROLE = keccak256("ORDER_MANAGER_ROLE");
+    
     address public projectOwner;
     address public project;
     address public orderManager;
-    address public daoContract;
-    address public tokenContract; // Address of the IOwnmaliAsset token contract
+    address public tokenContract;
     bytes32 public spvId;
     bytes32 public assetId;
 
@@ -42,15 +61,9 @@ contract OwnmaliAssetManager is
                              MODIFIERS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Restricts function calls to the SPV-level DAO contract
-    modifier onlyDao() {
-        if (msg.sender != daoContract) revert UnauthorizedCaller(msg.sender);
-        _;
-    }
-
-    /// @notice Restricts function calls to the order manager
+    /// @notice Restricts function calls to accounts with ORDER_MANAGER_ROLE
     modifier onlyOrderManager() {
-        if (msg.sender != orderManager) revert UnauthorizedCaller(msg.sender);
+        _checkRole(ORDER_MANAGER_ROLE);
         _;
     }
 
@@ -63,34 +76,37 @@ contract OwnmaliAssetManager is
     /// @param _project Project contract address
     /// @param _spvId SPV identifier
     /// @param _assetId Asset identifier
-    /// @param _daoContract SPV-level DAO contract address
+    /// @param _admin Admin address that will have DEFAULT_ADMIN_ROLE
     /// @param _tokenContract IOwnmaliAsset token contract address
     function initialize(
         address _projectOwner,
         address _project,
         bytes32 _spvId,
         bytes32 _assetId,
-        address _daoContract,
+        address _admin,
         address _tokenContract
-    ) public initializer {
-        if (_projectOwner == address(0)) revert InvalidAddress(_projectOwner, "projectOwner");
-        if (_project == address(0)) revert InvalidAddress(_project, "project");
-        if (_daoContract == address(0)) revert InvalidAddress(_daoContract, "daoContract");
-        if (_tokenContract == address(0)) revert InvalidAddress(_tokenContract, "tokenContract");
+    ) external initializer {
+        if (_projectOwner == address(0)) revert InvalidAddress(_projectOwner);
+        if (_project == address(0)) revert InvalidAddress(_project);
+        if (_admin == address(0)) revert InvalidAddress(_admin);
+        if (_tokenContract == address(0)) revert InvalidAddress(_tokenContract);
+        
         _spvId.validateId("spvId");
         _assetId.validateId("assetId");
 
         __UUPSUpgradeable_init();
         __Pausable_init();
+        __AccessControl_init();
 
         projectOwner = _projectOwner;
         project = _project;
         spvId = _spvId;
         assetId = _assetId;
-        daoContract = _daoContract;
         tokenContract = _tokenContract;
 
-        emit DaoContractSet(_daoContract);
+        // Grant DEFAULT_ADMIN_ROLE to the admin address
+        _grantRole(DEFAULT_ADMIN_ROLE, _admin);
+
         emit TokenContractSet(_tokenContract);
     }
 
@@ -98,26 +114,25 @@ contract OwnmaliAssetManager is
                            EXTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Sets the order manager contract address
+    /// @notice Sets the order manager contract address and grants ORDER_MANAGER_ROLE
     /// @param _orderManager New order manager address
-    function setOrderManager(address _orderManager) external onlyDao {
-        if (_orderManager == address(0)) revert InvalidAddress(_orderManager, "orderManager");
+    function setOrderManager(address _orderManager) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (_orderManager == address(0)) revert InvalidAddress(_orderManager);
+        
+        // Revoke role from previous order manager if exists
+        if (orderManager != address(0)) {
+            _revokeRole(ORDER_MANAGER_ROLE, orderManager);
+        }
+        
         orderManager = _orderManager;
+        _grantRole(ORDER_MANAGER_ROLE, _orderManager);
         emit OrderManagerSet(_orderManager);
-    }
-
-    /// @notice Sets the SPV-level DAO contract address
-    /// @param _daoContract New DAO contract address
-    function setDaoContract(address _daoContract) external onlyDao {
-        if (_daoContract == address(0)) revert InvalidAddress(_daoContract, "daoContract");
-        daoContract = _daoContract;
-        emit DaoContractSet(_daoContract);
     }
 
     /// @notice Sets the token contract address
     /// @param _tokenContract New IOwnmaliAsset token contract address
-    function setTokenContract(address _tokenContract) external onlyDao {
-        if (_tokenContract == address(0)) revert InvalidAddress(_tokenContract, "tokenContract");
+    function setTokenContract(address _tokenContract) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (_tokenContract == address(0)) revert InvalidAddress(_tokenContract);
         tokenContract = _tokenContract;
         emit TokenContractSet(_tokenContract);
     }
@@ -126,8 +141,8 @@ contract OwnmaliAssetManager is
     /// @param recipient Recipient address
     /// @param amount Token amount
     function mintTokens(address recipient, uint256 amount) external onlyOrderManager whenNotPaused {
-        if (recipient == address(0)) revert InvalidAddress(recipient, "recipient");
-        if (amount == 0) revert InvalidAmount(amount, "amount");
+        if (recipient == address(0)) revert InvalidAddress(recipient);
+        if (amount == 0) revert InvalidAmount(amount);
 
         try IOwnmaliAsset(tokenContract).mint(recipient, amount) {
             emit TokensMinted(recipient, amount);
@@ -141,25 +156,26 @@ contract OwnmaliAssetManager is
     /// @param to Recipient address
     /// @param amount Token amount
     function transferTokens(address from, address to, uint256 amount) external onlyOrderManager whenNotPaused {
-        if (from == address(0)) revert InvalidAddress(from, "from");
-        if (to == address(0)) revert InvalidAddress(to, "to");
-        if (amount == 0) revert InvalidAmount(amount, "amount");
+        if (from == address(0)) revert InvalidAddress(from);
+        if (to == address(0)) revert InvalidAddress(to);
+        if (amount == 0) revert InvalidAmount(amount);
 
-        bool success = IERC20Upgradeable(tokenContract).transferFrom(from, to, amount);
-        if (!success) revert TokenOperationFailed("transfer");
+        if (!IERC20Upgradeable(tokenContract).transferFrom(from, to, amount)) {
+            revert TokenOperationFailed("transfer");
+        }
 
         emit TokensTransferred(from, to, amount);
     }
 
-    /// @notice Locks tokens for an account (called by order manager)
+    /// @notice Locks tokens for an account with specified unlock time
     /// @param account Account address
     /// @param amount Token amount
-    function lockTokens(address account, uint256 amount) external onlyOrderManager whenNotPaused {
-        if (account == address(0)) revert InvalidAddress(account, "account");
-        if (amount == 0) revert InvalidAmount(amount, "amount");
+    /// @param unlockTime Timestamp when tokens can be unlocked
+    function lockTokens(address account, uint256 amount, uint256 unlockTime) external onlyOrderManager whenNotPaused {
+        if (account == address(0)) revert InvalidAddress(account);
+        if (amount == 0) revert InvalidAmount(amount);
+        if (unlockTime <= block.timestamp) revert InvalidAmount(unlockTime);
 
-        // Assume lock period is managed by IOwnmaliAsset; use current block timestamp + default period
-        uint256 unlockTime = block.timestamp + 365 days; // Example: 1-year lock
         try IOwnmaliAsset(tokenContract).lock(account, amount, unlockTime) {
             emit TokensLocked(account, amount);
         } catch {
@@ -171,8 +187,8 @@ contract OwnmaliAssetManager is
     /// @param account Account address
     /// @param amount Token amount
     function releaseTokens(address account, uint256 amount) external onlyOrderManager whenNotPaused {
-        if (account == address(0)) revert InvalidAddress(account, "account");
-        if (amount == 0) revert InvalidAmount(amount, "amount");
+        if (account == address(0)) revert InvalidAddress(account);
+        if (amount == 0) revert InvalidAmount(amount);
 
         try IOwnmaliAsset(tokenContract).unlock(account, amount) {
             emit TokensReleased(account, amount);
@@ -182,12 +198,12 @@ contract OwnmaliAssetManager is
     }
 
     /// @notice Pauses the contract
-    function pause() external onlyDao {
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _pause();
     }
 
     /// @notice Unpauses the contract
-    function unpause() external onlyDao {
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _unpause();
     }
 
@@ -197,9 +213,9 @@ contract OwnmaliAssetManager is
 
     /// @notice Authorizes contract upgrades
     /// @param newImplementation Address of the new implementation contract
-    function _authorizeUpgrade(address newImplementation) internal override onlyDao view {
+    function _authorizeUpgrade(address newImplementation) internal view override onlyRole(DEFAULT_ADMIN_ROLE) {
         if (newImplementation == address(0) || newImplementation.code.length == 0) {
-            revert InvalidAddress(newImplementation, "newImplementation");
+            revert InvalidImplementation();
         }
     }
 }

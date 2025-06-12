@@ -5,67 +5,65 @@ import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Ini
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {TrexToken} from "@tokenysolutions/t-rex/token/IToken.sol";
 import {IModularCompliance} from "@tokenysolutions/t-rex/compliance/modular/IModularCompliance.sol";
 import {IIdentityRegistry} from "@tokenysolutions/t-rex/registry/interface/IIdentityRegistry.sol";
 import "./Ownmali_Validation.sol";
 
 /// @title OwnmaliAsset
-/// @notice ERC-3643 compliant token for general asset tokenization with compliance and metadata management
-/// @dev Base contract for asset tokenization, extended by specific asset types like real estate
+/// @notice ERC-3643 compliant token for asset tokenization with compliance management
+/// @dev Production-ready contract for tokenizing real-world assets
 contract OwnmaliAsset is
     Initializable,
     UUPSUpgradeable,
     AccessControlUpgradeable,
     PausableUpgradeable,
-    ReentrancyGuardUpgradeable,
     TrexToken
 {
-    using SafeERC20 for IERC20;
     using OwnmaliValidation for *;
 
     /*//////////////////////////////////////////////////////////////
                              ERRORS
     //////////////////////////////////////////////////////////////*/
-    error InvalidAddress(address addr, string parameter);
-    error InvalidChainId(uint16 chainId);
-    error InvalidParameter(string parameter, string reason);
+    error InvalidAddress(address addr);
+    error InvalidParameter(string parameter);
     error ProjectInactive();
-    error InvalidMetadataCID(bytes32 owner);
-    error TokensLocked(address indexed user, uint48 unlockTime);
+    error TokensLocked(address user, uint48 unlockTime);
     error InvalidMetadataUpdate(uint256 updateId);
-    error AlreadySigned(address indexed signer);
+    error AlreadySigned(address signer);
     error UpdateAlreadyExecuted(uint256 updateId);
     error UnauthorizedCaller(address caller);
+    error TransferNotCompliant(address from, address to, uint256 amount);
+    error ExceedsMaxSupply(uint256 amount, uint256 maxSupply);
 
     /*//////////////////////////////////////////////////////////////
                            TYPE DECLARATIONS
     //////////////////////////////////////////////////////////////*/
-    struct AssetInitParams {
+    struct AssetConfig {
+        // Basic asset info
         string name;
         string symbol;
+        bytes32 assetId;
+        bytes32 assetType;
+        
+        // Financial parameters
         uint256 maxSupply;
         uint256 tokenPrice;
-        uint256 cancelDelay;
-        address owner;
-        address factory;
-        bytes32 spvId;
-        bytes32 assetId;
-        bytes32 metadataCID;
-        bytes32 assetType;
-        bytes32 legalMetadataCID;
-        uint16 chainId;
         uint8 dividendPct;
-        uint256 premintAmount;
-        uint256 minInvestment;
-        uint256 maxInvestment;
-        uint8 eoiPct;
+        
+        // Metadata
+        bytes32 metadataCID;
+        bytes32 legalMetadataCID;
+        
+        // Addresses
+        address assetOwner;
+        address factory;
         address identityRegistry;
         address compliance;
+        
+        // Configuration
+        uint16 chainId;
+        uint256 premintAmount;
     }
 
     struct MetadataUpdate {
@@ -76,134 +74,112 @@ contract OwnmaliAsset is
         bool executed;
     }
 
-    struct AssetDetails {
-        string name;
-        string symbol;
-        uint256 maxSupply;
-        uint256 tokenPrice;
-        uint256 cancelDelay;
-        uint8 dividendPct;
-        uint256 minInvestment;
-        uint256 maxInvestment;
-        bytes32 assetType;
-        bytes32 metadataCID;
-        bytes32 legalMetadataCID;
-        bytes32 spvId;
-        bytes32 assetId;
-        address owner;
-        address factory;
-        address assetManager;
-        address financialLedger;
-        address orderManager;
-        address spvDao;
-        address owner_;
-        uint16 chainId;
-        bool isActive;
-    }
-
     /*//////////////////////////////////////////////////////////////
                            STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
-    // Role definitions
+    // Role definitions - Only two roles as requested
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
-    bytes32 public constant ASSET_ADMIN_ROLE = keccak256("ASSET_ADMIN_ROLE");
-    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
-    bytes32 public constant AGENT_ROLE = keccak256("AGENT_ROLE");
+    bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
 
-    // Token configuration
-    uint256 public constant TOKEN_DECIMALS = 10 ** 18;
-    uint8 public maxDividendPct; // Max dividend percentage (1-100)
-    uint48 public defaultLockPeriod; // Default lock period in seconds
-    uint8 public requiredSignatures; // Number of signatures for metadata updates
+    // Constants
+    uint8 public constant MAX_DIVIDEND_PCT = 100;
+    uint8 public constant REQUIRED_SIGNATURES = 2;
 
-    // Asset metadata
-    bytes32 public spvId; // SPV identifier
-    bytes32 public assetId; // Asset identifier
-    bytes32 public metadataCID; // IPFS CID for asset metadata
-    bytes32 public legalMetadataCID; // IPFS CID for legal metadata
-    bytes32 public assetType; // Asset type (e.g., Commercial, Residential)
-
-    // Financial parameters
-    uint256 public tokenPrice; // Price per token in wei
-    uint256 public cancelDelay; // Delay before order cancellation
-    uint8 public dividendPct; // Dividend percentage (1-100)
-    uint256 public minInvestment; // Minimum investment in tokens
-    uint256 public maxInvestment; // Maximum investment in tokens
-    uint8 public eoiPct; // Expression of Interest percentage
+    // Asset configuration
+    bytes32 public assetId;
+    bytes32 public assetType;
+    bytes32 public metadataCID;
+    bytes32 public legalMetadataCID;
+    uint256 public tokenPrice;
+    uint8 public dividendPct;
+    uint256 public maxSupply;
+    uint16 public chainId;
 
     // Ecosystem contracts
-    address public owner; // Asset owner
-    address public factory; // Factory contract
-    address public assetManager; // Asset manager contract
-    address public financialLedger; // Financial ledger contract
-    address public orderManager; // Order manager contract
-    address public spvDao; // SPV DAO contract
-    IIdentityRegistry public identityRegistry; // Identity registry
-    IModularCompliance public compliance; // Compliance module
+    address public assetOwner;
+    address public factory;
+    IIdentityRegistry public identityRegistry;
+    IModularCompliance public compliance;
 
     // Operational state
-    uint16 public chainId; // Chain ID for cross-chain compatibility
-    bool public isActive; // Asset active status
-    mapping(address => uint48) public unlockTime; // Token lock periods
-    mapping(uint256 => MetadataUpdate) private metadataUpdates; // Metadata update proposals
-    uint256 public metadataUpdateCount; // Counter for metadata updates
+    bool public isActive;
+    mapping(address => uint48) public unlockTime;
+    mapping(uint256 => MetadataUpdate) private metadataUpdates;
+    uint256 public metadataUpdateCount;
 
     /*//////////////////////////////////////////////////////////////
                              EVENTS
     //////////////////////////////////////////////////////////////*/
-    event LockPeriodSet(address indexed user, uint48 unlockTime, uint16 chainId);
-    event BatchLockPeriodSet(uint256 userCount, uint48 unlockTime, uint16 chainId);
-    event ProjectDeactivated(address indexed project, bytes32 reason, uint16 chainId);
-    event MetadataUpdateProposed(uint256 indexed updateId, bytes32 newCID, bool isLegal, uint16 chainId);
-    event MetadataUpdateSigned(uint256 indexed updateId, address indexed signer, uint16 chainId);
-    event MetadataUpdated(uint256 indexed updateId, bytes32 oldCID, bytes32 newCID, bool isLegal, uint16 chainId);
-    event ProjectContractsSet(address indexed escrow, address indexed orderManager, address indexed dao, uint16 chainId);
-    event EmergencyWithdrawal(address indexed recipient, uint256 amount, uint16 chainId);
-    event MaxDividendPctSet(uint256 newMaxDividendPct);
-    event DefaultLockPeriodSet(uint48 newLockPeriod);
-    event RequiredSignaturesSet(uint256 newRequiredSignatures);
+    event LockPeriodSet(address indexed user, uint48 unlockTime);
+    event ProjectStatusChanged(bool isActive);
+    event MetadataUpdateProposed(uint256 indexed updateId, bytes32 newCID, bool isLegal);
+    event MetadataUpdateSigned(uint256 indexed updateId, address indexed signer);
+    event MetadataUpdated(uint256 indexed updateId, bytes32 oldCID, bytes32 newCID, bool isLegal);
+
+    /*//////////////////////////////////////////////////////////////
+                           MODIFIERS
+    //////////////////////////////////////////////////////////////*/
+    modifier onlyActiveProject() {
+        if (!isActive) revert ProjectInactive();
+        _;
+    }
+
+    modifier onlyFactory() {
+        if (msg.sender != factory) revert UnauthorizedCaller(msg.sender);
+        _;
+    }
 
     /*//////////////////////////////////////////////////////////////
                            INITIALIZATION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Initializes the project contract
-    /// @param initData Encoded AssetInitParams for initialization
-    function initialize(bytes memory initData) public virtual initializer {
-        AssetInitParams memory params = abi.decode(initData, (AssetInitParams));
-        _validateInitParams(params);
+    /// @notice Initializes the asset contract
+    /// @param configData Encoded AssetConfig for initialization
+    function initialize(bytes calldata configData) external initializer {
+        AssetConfig memory config = abi.decode(configData, (AssetConfig));
+        _validateConfig(config);
 
         __UUPSUpgradeable_init();
         __AccessControl_init();
-        __ReentrancyGuard_init();
         __Pausable_init();
 
+        // Initialize TrexToken
         TrexToken.initialize(
-            params.name,
-            params.symbol,
+            config.name,
+            config.symbol,
             18,
-            params.identityRegistry,
-            params.compliance,
-            params.owner
+            config.identityRegistry,
+            config.compliance,
+            config.assetOwner
         );
 
-        _setProjectState(params);
+        // Set state variables
+        assetId = config.assetId;
+        assetType = config.assetType;
+        metadataCID = config.metadataCID;
+        legalMetadataCID = config.legalMetadataCID;
+        tokenPrice = config.tokenPrice;
+        dividendPct = config.dividendPct;
+        maxSupply = config.maxSupply;
+        chainId = config.chainId;
+        assetOwner = config.assetOwner;
+        factory = config.factory;
+        identityRegistry = IIdentityRegistry(config.identityRegistry);
+        compliance = IModularCompliance(config.compliance);
+        isActive = true;
 
-        maxDividendPct = 50;
-        defaultLockPeriod = uint48(365 days);
-        requiredSignatures = 2;
+        // Setup roles
+        _grantRole(DEFAULT_ADMIN_ROLE, config.assetOwner);
+        _grantRole(ADMIN_ROLE, config.assetOwner);
+        _grantRole(OPERATOR_ROLE, config.assetOwner);
+        _setRoleAdmin(OPERATOR_ROLE, ADMIN_ROLE);
 
-        _grantRole(DEFAULT_ADMIN_ROLE, params.owner);
-        _grantRole(ADMIN_ROLE, params.owner);
-        _grantRole(AGENT_ROLE, params.owner);
-        _setRoleAdmin(ASSET_ADMIN_ROLE, ADMIN_ROLE);
-        _setRoleAdmin(MINTER_ROLE, ADMIN_ROLE);
-        _grantRole(ASSET_ADMIN_ROLE, params.owner);
-        _grantRole(MINTER_ROLE, params.owner);
+        // Premint if specified
+        if (config.premintAmount > 0) {
+            _mint(config.assetOwner, config.premintAmount);
+        }
 
-        emit MaxDividendPctSet(maxDividendPct);
-        emit DefaultLockPeriodSet(defaultLockPeriod);
-        emit RequiredSignaturesSet(requiredSignatures);
+        emit ProjectStatusChanged(true);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -213,22 +189,35 @@ contract OwnmaliAsset is
     /// @notice Proposes a metadata update
     /// @param newCID New IPFS CID
     /// @param isLegal Whether the update is for legal metadata
-    function proposeMetadataUpdate(bytes32 newCID, bool isLegal) external onlyRole(ASSET_ADMIN_ROLE) whenNotPaused {
+    function proposeMetadataUpdate(bytes32 newCID, bool isLegal) 
+        external 
+        onlyRole(OPERATOR_ROLE) 
+        whenNotPaused 
+        onlyActiveProject 
+    {
         newCID.validateCID("newCID");
+        
         uint256 updateId = metadataUpdateCount++;
         MetadataUpdate storage update = metadataUpdates[updateId];
         update.newCID = newCID;
         update.isLegal = isLegal;
         update.signed[msg.sender] = true;
         update.signatureCount = 1;
-        emit MetadataUpdateProposed(updateId, newCID, isLegal, chainId);
-        emit MetadataUpdateSigned(updateId, msg.sender, chainId);
+        
+        emit MetadataUpdateProposed(updateId, newCID, isLegal);
+        emit MetadataUpdateSigned(updateId, msg.sender);
     }
 
     /// @notice Approves a metadata update
     /// @param updateId ID of the metadata update
-    function approveMetadataUpdate(uint256 updateId) external onlyRole(ASSET_ADMIN_ROLE) whenNotPaused {
+    function approveMetadataUpdate(uint256 updateId) 
+        external 
+        onlyRole(OPERATOR_ROLE) 
+        whenNotPaused 
+        onlyActiveProject 
+    {
         if (updateId >= metadataUpdateCount) revert InvalidMetadataUpdate(updateId);
+        
         MetadataUpdate storage update = metadataUpdates[updateId];
         if (update.newCID == bytes32(0)) revert InvalidMetadataUpdate(updateId);
         if (update.executed) revert UpdateAlreadyExecuted(updateId);
@@ -236,241 +225,180 @@ contract OwnmaliAsset is
 
         update.signed[msg.sender] = true;
         update.signatureCount++;
-        emit MetadataUpdateSigned(updateId, msg.sender, chainId);
+        emit MetadataUpdateSigned(updateId, msg.sender);
 
-        if (update.signatureCount >= requiredSignatures) {
+        if (update.signatureCount >= REQUIRED_SIGNATURES) {
             bytes32 oldCID = update.isLegal ? legalMetadataCID : metadataCID;
+            
             if (update.isLegal) {
                 legalMetadataCID = update.newCID;
             } else {
                 metadataCID = update.newCID;
             }
+            
             update.executed = true;
-            emit MetadataUpdated(updateId, oldCID, update.newCID, update.isLegal, chainId);
+            emit MetadataUpdated(updateId, oldCID, update.newCID, update.isLegal);
         }
-    }
-
-    /// @notice Sets project contracts and premints tokens
-    /// @param _escrow Escrow contract address
-    /// @param _orderManager Order manager contract address
-    /// @param _dao DAO contract address
-    /// @param _preMintAmount Amount to premint
-    function setProjectContractsAndPreMint(
-        address _escrow,
-        address _orderManager,
-        address _dao,
-        uint256 _preMintAmount
-    ) public virtual {
-        if (msg.sender != factory) revert UnauthorizedCaller(msg.sender);
-        if (_escrow == address(0)) revert InvalidAddress(_escrow, "escrow");
-        if (_orderManager == address(0)) revert InvalidAddress(_orderManager, "orderManager");
-        if (_dao == address(0)) revert InvalidAddress(_dao, "dao");
-        if (_preMintAmount > getProjectDetails().maxSupply) {
-            revert InvalidParameter("preMintAmount", "exceeds maxSupply");
-        }
-
-        assetManager = _escrow; // Updated to assetManager
-        orderManager = _orderManager;
-        spvDao = _dao; // Updated to spvDao
-
-        if (_preMintAmount > 0) {
-            if (!compliance.canTransfer(address(0), assetManager, _preMintAmount)) {
-                revert TransferNotCompliant(address(0), assetManager, _preMintAmount);
-            }
-            _mint(assetManager, _preMintAmount);
-        }
-
-        emit ProjectContractsSet(assetManager, _orderManager, spvDao, chainId);
-    }
-
-    /// @notice Sets the maximum dividend percentage
-    /// @param _maxDividendPct New maximum dividend percentage
-    function setMaxDividendPct(uint256 _maxDividendPct) external onlyRole(ADMIN_ROLE) {
-        if (_maxDividendPct == 0 || _maxDividendPct > 100) {
-            revert InvalidParameter("maxDividendPct", "must be between 1 and 100");
-        }
-        maxDividendPct = uint8(_maxDividendPct);
-        emit MaxDividendPctSet(_maxDividendPct);
-    }
-
-    /// @notice Sets the default lock period
-    /// @param _lockPeriod New lock period in seconds
-    function setDefaultLockPeriod(uint48 _lockPeriod) external onlyRole(ADMIN_ROLE) {
-        if (_lockPeriod == 0) revert InvalidParameter("lockPeriod", "must be non-zero");
-        defaultLockPeriod = _lockPeriod;
-        emit DefaultLockPeriodSet(_lockPeriod);
-    }
-
-    /// @notice Sets the required signatures for metadata updates
-    /// @param _requiredSignatures New number of required signatures
-    function setRequiredSignatures(uint256 _requiredSignatures) external onlyRole(ADMIN_ROLE) {
-        if (_requiredSignatures == 0) revert InvalidParameter("requiredSignatures", "must be non-zero");
-        requiredSignatures = uint8(_requiredSignatures);
-        emit RequiredSignaturesSet(_requiredSignatures);
     }
 
     /// @notice Sets the lock period for a user
     /// @param user User address
-    /// @param unlockTime Unlock timestamp
-    function setLockPeriod(address user, uint48 unlockTime) external onlyRole(ADMIN_ROLE) {
-        if (user == address(0)) revert InvalidAddress(user, "user");
-        if (unlockTime <= block.timestamp) revert InvalidParameter("unlockTime", "must be in future");
-        unlockTime[user] = unlockTime;
-        emit LockPeriodSet(user, unlockTime, chainId);
+    /// @param _unlockTime Unlock timestamp
+    function setLockPeriod(address user, uint48 _unlockTime) 
+        external 
+        onlyRole(ADMIN_ROLE) 
+    {
+        if (user == address(0)) revert InvalidAddress(user);
+        if (_unlockTime <= block.timestamp) revert InvalidParameter("unlockTime");
+        
+        unlockTime[user] = _unlockTime;
+        emit LockPeriodSet(user, _unlockTime);
     }
 
-    /// @notice Pauses the contract and associated contracts
-    function pause() public virtual override onlyRole(ADMIN_ROLE) {
+    /// @notice Updates project status
+    /// @param _isActive New active status
+    function setProjectStatus(bool _isActive) external onlyRole(ADMIN_ROLE) {
+        isActive = _isActive;
+        emit ProjectStatusChanged(_isActive);
+    }
+
+    /// @notice Updates token price
+    /// @param _tokenPrice New token price
+    function setTokenPrice(uint256 _tokenPrice) external onlyRole(ADMIN_ROLE) {
+        if (_tokenPrice == 0) revert InvalidParameter("tokenPrice");
+        tokenPrice = _tokenPrice;
+    }
+
+    /// @notice Updates dividend percentage
+    /// @param _dividendPct New dividend percentage
+    function setDividendPct(uint8 _dividendPct) external onlyRole(ADMIN_ROLE) {
+        if (_dividendPct > MAX_DIVIDEND_PCT) revert InvalidParameter("dividendPct");
+        dividendPct = _dividendPct;
+    }
+
+    /// @notice Mints tokens to specified address
+    /// @param to Recipient address
+    /// @param amount Amount to mint
+    function mint(address to, uint256 amount) 
+        external 
+        onlyRole(OPERATOR_ROLE) 
+        whenNotPaused 
+        onlyActiveProject 
+    {
+        if (to == address(0)) revert InvalidAddress(to);
+        if (totalSupply() + amount > maxSupply) {
+            revert ExceedsMaxSupply(totalSupply() + amount, maxSupply);
+        }
+        if (!compliance.canTransfer(address(0), to, amount)) {
+            revert TransferNotCompliant(address(0), to, amount);
+        }
+        
+        _mint(to, amount);
+    }
+
+    /// @notice Pauses the contract
+    function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
-        if (assetManager != address(0)) IOwnmaliEscrow(assetManager).pause();
-        if (orderManager != address(0)) IOwnmaliOrderManager(orderManager).pause();
     }
 
-    /// @notice Unpauses the contract and associated contracts
-    function unpause() public virtual override onlyRole(ADMIN_ROLE) {
+    /// @notice Unpauses the contract
+    function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
-        if (assetManager != address(0)) IOwnmaliEscrow(assetManager).unpause();
-        if (orderManager != address(0)) IOwnmaliOrderManager(orderManager).unpause();
     }
 
     /*//////////////////////////////////////////////////////////////
                            INTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Sets project state variables
-    /// @param params Asset initialization parameters
-    function _setProjectState(AssetInitParams memory params) internal virtual {
-        factory = params.factory;
-        owner = params.owner;
-        spvId = params.spvId;
-        assetId = params.assetId;
-        tokenPrice = params.tokenPrice;
-        cancelDelay = params.cancelDelay;
-        dividendPct = params.dividendPct;
-        minInvestment = params.minInvestment;
-        maxInvestment = params.maxInvestment;
-        assetType = params.assetType;
-        legalMetadataCID = params.legalMetadataCID;
-        metadataCID = params.metadataCID;
-        chainId = params.chainId;
-        eoiPct = params.eoiPct;
-        isActive = true;
-        identityRegistry = IIdentityRegistry(params.identityRegistry);
-        compliance = IModularCompliance(params.compliance);
-    }
-
     /// @notice Validates token transfers
     /// @param from Sender address
     /// @param to Recipient address
     /// @param amount Amount to transfer
-    function _beforeTokenTransfer(address from, address to, uint256 amount) internal virtual override {
+    function _beforeTokenTransfer(address from, address to, uint256 amount) 
+        internal 
+        virtual 
+        override 
+        whenNotPaused
+    {
+        if (amount == 0) revert InvalidParameter("amount");
         if (!isActive) revert ProjectInactive();
+        
+        // Check lock period for sender
         if (from != address(0) && block.timestamp < unlockTime[from]) {
             revert TokensLocked(from, unlockTime[from]);
         }
+        
+        // Compliance check for transfers
         if (from != address(0) && to != address(0)) {
             if (!compliance.canTransfer(from, to, amount)) {
                 revert TransferNotCompliant(from, to, amount);
             }
-            if (amount < minInvestment && balanceOf(to) + amount < minInvestment) {
-                revert InvalidParameter("amount", "below minInvestment");
-            }
-            if (balanceOf(to) + amount > maxInvestment) {
-                revert InvalidParameter("amount", "exceeds maxInvestment");
-            }
+        }
+        
+        // Check max supply on minting
+        if (from == address(0) && totalSupply() + amount > maxSupply) {
+            revert ExceedsMaxSupply(totalSupply() + amount, maxSupply);
         }
     }
 
-    /// @notice Validates initialization parameters
-    /// @param params Asset initialization parameters
-    function _validateInitParams(AssetInitParams memory params) internal virtual view {
-        if (params.factory == address(0)) revert InvalidAddress(params.factory, "factory");
-        if (params.owner == address(0)) revert InvalidAddress(params.owner, "owner");
-        if (params.identityRegistry == address(0)) revert InvalidAddress(params.identityRegistry, "identityRegistry");
-        if (params.compliance == address(0)) revert InvalidAddress(params.compliance, "compliance");
-        params.name.validateString("name", 1, 100);
-        params.symbol.validateString("symbol", 1, 10);
-        params.spvId.validateId("spvId");
-        params.assetId.validateId("assetId");
-        params.metadataCID.validateCID("metadataCID");
-        params.legalMetadataCID.validateCID("legalMetadataCID");
-        if (params.maxSupply == 0) revert InvalidParameter("maxSupply", "must be non-zero");
-        if (params.tokenPrice == 0) revert InvalidParameter("tokenPrice", "must be non-zero");
-        if (params.cancelDelay == 0) revert InvalidParameter("cancelDelay", "must be non-zero");
-        if (params.dividendPct > maxDividendPct) revert InvalidParameter("dividendPct", "exceeds maxDividendPct");
-        if (params.premintAmount > params.maxSupply) revert InvalidParameter("premintAmount", "exceeds maxSupply");
-        if (params.minInvestment == 0) revert InvalidParameter("minInvestment", "must be non-zero");
-        if (params.maxInvestment < params.minInvestment) {
-            revert InvalidParameter("maxInvestment", "must be at least minInvestment");
-        }
-        if (params.chainId == 0) revert InvalidChainId(params.chainId);
-        if (params.eoiPct > 50) revert InvalidParameter("eoiPct", "must not exceed 50");
+    /// @notice Validates asset configuration
+    /// @param config Asset configuration struct
+    function _validateConfig(AssetConfig memory config) internal pure {
+        if (config.assetOwner == address(0)) revert InvalidAddress(config.assetOwner);
+        if (config.factory == address(0)) revert InvalidAddress(config.factory);
+        if (config.identityRegistry == address(0)) revert InvalidAddress(config.identityRegistry);
+        if (config.compliance == address(0)) revert InvalidAddress(config.compliance);
+        
+        config.name.validateString("name", 1, 100);
+        config.symbol.validateString("symbol", 1, 10);
+        config.assetId.validateId("assetId");
+        config.metadataCID.validateCID("metadataCID");
+        config.legalMetadataCID.validateCID("legalMetadataCID");
+        
+        if (config.maxSupply == 0) revert InvalidParameter("maxSupply");
+        if (config.tokenPrice == 0) revert InvalidParameter("tokenPrice");
+        if (config.dividendPct > MAX_DIVIDEND_PCT) revert InvalidParameter("dividendPct");
+        if (config.premintAmount > config.maxSupply) revert InvalidParameter("premintAmount");
+        if (config.chainId == 0) revert InvalidParameter("chainId");
     }
 
     /// @notice Authorizes contract upgrades
     /// @param newImplementation Address of the new implementation contract
-    function _authorizeUpgrade(address newImplementation) internal view override onlyRole(DEFAULT_ADMIN_ROLE) {
+    function _authorizeUpgrade(address newImplementation) 
+        internal 
+        view 
+        override 
+        onlyRole(DEFAULT_ADMIN_ROLE) 
+    {
         if (newImplementation == address(0) || newImplementation.code.length == 0) {
-            revert InvalidAddress(newImplementation, "newImplementation");
+            revert InvalidAddress(newImplementation);
         }
     }
 
     /*//////////////////////////////////////////////////////////////
-                           EXTERNAL VIEW FUNCTIONS
+                           VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Returns the project owner
-    /// @return Project owner address
-    function owner() external view returns (address) {
-        return owner;
-    }
-
-    /// @notice Returns whether the project is active
-    /// @return True if active
-    function getIsActive() external view returns (bool) {
-        return isActive;
-    }
-
-    /// @notice Returns investment limits
-    /// @return minInvestment_ Minimum investment
-    /// @return maxInvestment_ Maximum investment
-    function getInvestmentLimits() external view returns (uint256 minInvestment_, uint256 maxInvestment_) {
-        return (minInvestment, maxInvestment);
-    }
-
-    /// @notice Returns project details
-    /// @return Project details struct
-    function getProjectDetails() public view virtual returns (AssetDetails memory) {
-        return AssetDetails({
+    /// @notice Returns asset configuration
+    /// @return Asset configuration struct
+    function getAssetConfig() external view returns (AssetConfig memory) {
+        return AssetConfig({
             name: name(),
             symbol: symbol(),
-            maxSupply: totalSupply(),
-            tokenPrice: tokenPrice,
-            cancelDelay: cancelDelay,
-            dividendPct: dividendPct,
-            minInvestment: minInvestment,
-            maxInvestment: maxInvestment,
+            assetId: assetId,
             assetType: assetType,
+            maxSupply: maxSupply,
+            tokenPrice: tokenPrice,
+            dividendPct: dividendPct,
             metadataCID: metadataCID,
             legalMetadataCID: legalMetadataCID,
-            spvId: spvId,
-            assetId: assetId,
-            owner: owner,
+            assetOwner: assetOwner,
             factory: factory,
-            assetManager: assetManager,
-            financialLedger: financialLedger,
-            orderManager: orderManager,
-            spvDao: spvDao,
-            owner_: owner,
+            identityRegistry: address(identityRegistry),
+            compliance: address(compliance),
             chainId: chainId,
-            isActive: isActive
+            premintAmount: 0 // Not stored after initialization
         });
-    }
-
-    /// @notice Returns the project owner
-    /// @return Project owner address
-    function getProjectOwner() external view returns (address) {
-        return owner;
     }
 
     /// @notice Returns metadata update details
@@ -482,7 +410,7 @@ contract OwnmaliAsset is
     function getMetadataUpdate(uint256 updateId)
         external
         view
-        returns (bytes32 newCID, bool isLegal, uint256 signatureCount, bool executed)
+        returns (bytes32 newCID, bool isLegal, uint8 signatureCount, bool executed)
     {
         if (updateId >= metadataUpdateCount) revert InvalidMetadataUpdate(updateId);
         MetadataUpdate storage update = metadataUpdates[updateId];
@@ -501,7 +429,14 @@ contract OwnmaliAsset is
     /// @notice Returns the lock period for an account
     /// @param account Account address
     /// @return Lock period timestamp
-    function getLockUntil(address account) external view returns (uint256) {
+    function getLockUntil(address account) external view returns (uint48) {
         return unlockTime[account];
+    }
+
+    /// @notice Returns supply information
+    /// @return currentSupply Current token supply
+    /// @return maxSupply_ Maximum token supply
+    function getSupplyInfo() external view returns (uint256 currentSupply, uint256 maxSupply_) {
+        return (totalSupply(), maxSupply);
     }
 }
