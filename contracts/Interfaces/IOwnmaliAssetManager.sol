@@ -1,90 +1,94 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-/// @title Interface for OwnmaliAssetManager
-/// @notice Defines the external and public functions, events, and errors for the OwnmaliAssetManager contract
-interface IOwnmaliAssetManager {
-    /// @notice Error thrown when an address is invalid
-    error InvalidAddress(address addr);
-    /// @notice Error thrown when an amount is invalid
-    error InvalidAmount(uint256 amount);
-    /// @notice Error thrown when the caller is unauthorized
-    error UnauthorizedCaller(address caller);
-    /// @notice Error thrown when a token operation fails
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+
+/// @title IOwnmaliAssetManager
+/// @notice Interface for the OwnmaliAssetManager contract, managing token operations for an SPV’s real estate token.
+interface IOwnmaliAssetManager is
+    Initializable,
+    UUPSUpgradeable,
+    PausableUpgradeable,
+    AccessControlUpgradeable,
+    ReentrancyGuardUpgradeable
+{
+    /*//////////////////////////////////////////////////////////////
+                                 ERRORS
+    //////////////////////////////////////////////////////////////*/
+    error InvalidAddress(address addr, string parameter);
+    error InvalidAmount(uint256 amount, string parameter);
+    error InvalidTokenContract(address tokenContract);
+    error TimelockNotExpired(uint48 unlockTime);
+    error InvalidReasonLength(string reason);
     error TokenOperationFailed(string operation);
-    /// @notice Error thrown when the implementation is invalid
-    error InvalidImplementation();
+    error ArrayLengthMismatch(uint256 expected, uint256 actual);
 
-    /// @notice Emitted when the order manager is set
-    event OrderManagerSet(address indexed orderManager);
-    /// @notice Emitted when the token contract is set
+    /*//////////////////////////////////////////////////////////////
+                             TYPE DECLARATIONS
+    //////////////////////////////////////////////////////////////*/
+    /// @notice Structure for pending critical updates with timelock.
+    struct PendingUpdate {
+        address target;
+        bytes32 role;
+        bool grant;
+        uint48 unlockTime;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                 EVENTS
+    //////////////////////////////////////////////////////////////*/
     event TokenContractSet(address indexed tokenContract);
-    /// @notice Emitted when tokens are minted
-    event TokensMinted(address indexed recipient, uint256 amount);
-    /// @notice Emitted when tokens are transferred
     event TokensTransferred(address indexed from, address indexed to, uint256 amount);
-    /// @notice Emitted when tokens are locked
-    event TokensLocked(address indexed account, uint256 amount);
-    /// @notice Emitted when tokens are released
-    event TokensReleased(address indexed account, uint256 amount);
+    event ApprovalSet(address indexed owner, address indexed spender, uint256 amount);
+    event ForcedTransfer(address indexed from, address indexed to, uint256 amount, string reason);
 
-    /// @notice Initializes the asset manager contract
-    /// @param _owner Owner address with admin privileges
-    /// @param _tokenContract Address of the token contract to manage
+    /*//////////////////////////////////////////////////////////////
+                           INITIALIZATION
+    //////////////////////////////////////////////////////////////*/
     function initialize(
-        address _owner,
-        address _tokenContract
+        address admin,
+        address tokenManager,
+        address forcedTransferManager,
+        address tokenContract_
     ) external;
 
-    /// @notice Returns the token contract address
-    /// @return The token contract address
+    /*//////////////////////////////////////////////////////////////
+                           TOKEN MANAGEMENT FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+    function transferTokens(address to, uint256 amount) external;
+    function transferTokensFrom(address from, address to, uint256 amount) external;
+    function batchTransferTokens(address[] calldata recipients, uint256[] calldata amounts) external;
+    function approveTokens(address spender, uint256 amount) external;
+    function forcedTransferTokens(address from, address to, uint256 amount, string calldata reason) external;
+
+    /*//////////////////////////////////////////////////////////////
+                           CONFIGURATION FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+    function setTokenContract(address newTokenContract) external;
+    function setRole(bytes32 role, address account, bool grant) external;
+    function revokeAdminRole(address account) external;
+
+    /*//////////////////////////////////////////////////////////////
+                           VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+    function getAllowance(address owner, address spender) external view returns (uint256);
+    function getBalance(address account) external view returns (uint256);
+    function getRealEstateConfig() external view returns (bytes32[] memory supportedAssetTypes, uint256 remainingSupply);
+    function getPendingUpdate(bytes32 actionId)
+        external
+        view
+        returns (address target, bytes32 role, bool grant, uint48 unlockTime);
+
+    /*//////////////////////////////////////////////////////////////
+                           STATE VARIABLES
+    //////////////////////////////////////////////////////////////*/
+    function TIMELOCK_DURATION() external view returns (uint48);
+    function TOKEN_MANAGER_ROLE() external view returns (bytes32);
+    function FORCED_TRANSFER_ROLE() external view returns (bytes32);
     function tokenContract() external view returns (address);
-    
-    /// @notice Returns the order manager address
-    /// @return The order manager address
-    function orderManager() external view returns (address);
-    
-    /// @notice Returns the owner address
-    /// @return The owner address
-    function owner() external view returns (address);
-    
-    /// @notice Returns the implementation address
-    /// @return The implementation address
-    function getImplementation() external view returns (address);
-
-    /// @notice Sets the order manager contract address
-    /// @param _orderManager New order manager address
-    function setOrderManager(address _orderManager) external;
-    
-    /// @notice Sets the token contract address
-    /// @param _tokenContract New token contract address
-    function setTokenContract(address _tokenContract) external;
-    
-    /// @notice Mints tokens to a recipient
-    /// @param recipient Recipient address
-    /// @param amount Amount of tokens to mint
-    function mintTokens(address recipient, uint256 amount) external;
-    
-    /// @notice Transfers tokens between accounts
-    /// @param from Sender address
-    /// @param to Recipient address
-    /// @param amount Amount of tokens
-    function transferTokens(address from, address to, uint256 amount) external;
-    
-    /// @notice Locks tokens for an account until a specified time
-    /// @param account Account to lock tokens for
-    /// @param amount Amount of tokens
-    /// @param unlockTime Unlock timestamp
-    function lockTokens(address account, uint256 amount, uint256 unlockTime) external;
-
-    /// @notice Releases locked tokens for an account
-    /// @param account Account to release tokens for
-    /// @param amount Amount of tokens
-    function releaseTokens(address account, uint256 amount) external;
-
-    /// @notice Pauses the contract
-    function pause() external;
-
-    /// @notice Unpauses the contract
-    function unpause() external;
+    function pendingUpdates(bytes32 actionId) external view returns (PendingUpdate memory);
 }

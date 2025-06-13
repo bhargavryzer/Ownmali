@@ -1,27 +1,36 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import "./IOwnmaliAsset.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "./Ownmali_Asset.sol";
 
-/// @title Interface for OwnmaliFactory
-/// @notice Defines the external and public functions, events, errors, and data structures for the OwnmaliFactory contract
-interface IOwnmaliFactory {
-    /// @notice Error thrown when an address is invalid
+/// @title IOwnmaliFactory
+/// @notice Interface for the OwnmaliFactory contract, deploying tokenized asset projects for SPVs in the Ownmali ecosystem.
+interface IOwnmaliFactory is
+    Initializable,
+    UUPSUpgradeable,
+    AccessControlUpgradeable,
+    PausableUpgradeable,
+    ReentrancyGuardUpgradeable
+{
+    /*//////////////////////////////////////////////////////////////
+                             ERRORS
+    //////////////////////////////////////////////////////////////*/
     error InvalidAddress(address addr, string parameter);
-    /// @notice Error thrown when a parameter is invalid
     error InvalidParameter(string parameter, string reason);
-    /// @notice Error thrown when a template is not set
     error TemplateNotSet(string templateType);
-    /// @notice Error thrown when contract initialization fails
     error InitializationFailed(string contractType);
-    /// @notice Error thrown when maximum assets are exceeded
     error MaxAssetsExceeded(uint256 current, uint256 max);
-    /// @notice Error thrown when an invalid asset type is provided
     error InvalidAssetType(bytes32 assetType);
-    /// @notice Error thrown when an SPV already has an asset
     error SPVHasAsset(bytes32 spvId, bytes32 existingAssetId);
 
-    /// @notice Struct for asset-related contract addresses
+    /*//////////////////////////////////////////////////////////////
+                           TYPE DECLARATIONS
+    //////////////////////////////////////////////////////////////*/
     struct AssetContracts {
         address asset;
         address assetManager;
@@ -30,7 +39,9 @@ interface IOwnmaliFactory {
         address spvDao;
     }
 
-    /// @notice Emitted when a new asset and its contracts are created
+    /*//////////////////////////////////////////////////////////////
+                           EVENTS
+    //////////////////////////////////////////////////////////////*/
     event AssetCreated(
         bytes32 indexed spvId,
         bytes32 indexed assetId,
@@ -40,31 +51,19 @@ interface IOwnmaliFactory {
         address orderManager,
         address spvDao
     );
-    /// @notice Emitted when a template is set
     event TemplateSet(string templateType, address indexed template);
-    /// @notice Emitted when max assets is set
     event MaxAssetsSet(uint256 newMax);
 
-    /// @notice Initializes the factory contract
-    /// @param _admin Admin address for role assignment
+    /*//////////////////////////////////////////////////////////////
+                           INITIALIZATION
+    //////////////////////////////////////////////////////////////*/
     function initialize(address _admin) external;
 
-    /// @notice Sets the template for a contract type
-    /// @param templateType Type of template ("asset", "assetManager", "financialLedger", "orderManager", "spvDao")
-    /// @param template Address of the template contract
+    /*//////////////////////////////////////////////////////////////
+                           EXTERNAL FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
     function setTemplate(string memory templateType, address template) external;
-
-    /// @notice Sets the maximum number of assets
-    /// @param _maxAssets New maximum number of assets
     function setMaxAssets(uint256 _maxAssets) external;
-
-    /// @notice Creates a new asset with associated contracts for an SPV
-    /// @param params Asset initialization parameters
-    /// @return assetAddress Address of the deployed asset contract
-    /// @return assetManagerAddress Address of the deployed asset manager contract
-    /// @return financialLedgerAddress Address of the deployed financial ledger contract
-    /// @return orderManagerAddress Address of the deployed order manager contract
-    /// @return spvDaoAddress Address of the deployed SPV DAO contract
     function createAsset(OwnmaliAsset.AssetInitParams memory params)
         external
         returns (
@@ -74,20 +73,27 @@ interface IOwnmaliFactory {
             address orderManagerAddress,
             address spvDaoAddress
         );
-
-    /// @notice Pauses the contract
     function pause() external;
-
-    /// @notice Unpauses the contract
     function unpause() external;
 
-    /// @notice Returns asset contracts for an asset ID
-    /// @param assetId Asset identifier
-    /// @return AssetContracts struct
+    /*//////////////////////////////////////////////////////////////
+                           EXTERNAL VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
     function getAssetContracts(bytes32 assetId) external view returns (AssetContracts memory);
-
-    /// @notice Returns the asset ID for an SPV
-    /// @param spvId SPV identifier
-    /// @return Asset ID associated with the SPV
     function getSPVAsset(bytes32 spvId) external view returns (bytes32);
+
+    /*//////////////////////////////////////////////////////////////
+                           STATE VARIABLES
+    //////////////////////////////////////////////////////////////*/
+    function ADMIN_ROLE() external view returns (bytes32);
+    function FACTORY_MANAGER_ROLE() external view returns (bytes32);
+    function maxAssets() external view returns (uint256);
+    function assetTemplate() external view returns (address);
+    function assetManagerTemplate() external view returns (address);
+    function financialLedgerTemplate() external view returns (address);
+    function orderManagerTemplate() external view returns (address);
+    function spvDaoTemplate() external view returns (address);
+    function assets(bytes32 assetId) external view returns (AssetContracts memory);
+    function spvToAsset(bytes32 spvId) external view returns (bytes32);
+    function assetCount() external view returns (uint256);
 }

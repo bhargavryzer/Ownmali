@@ -1,125 +1,128 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {IERC20} from "../../lib/@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IERC20Metadata} from "../../lib/@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {IIdentityRegistry} from "../../lib/@tokenysolutions/t-rex/contracts/registry/interface/IIdentityRegistry.sol";
-import {IModularCompliance} from "../../lib/@tokenysolutions/t-rex/contracts/compliance/modular/IModularCompliance.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "../lib/@tokenysolutions/t-rex/contracts/token/IToken.sol";
 
-interface IOwnmaliAsset is IERC20, IERC20Metadata {
-    // Struct for project details
-    struct AssetDetails {
-        string name;
-        string symbol;
-        uint256 maxSupply;
-        uint256 tokenPrice;
-        uint256 cancelDelay;
-        uint8 dividendPct;
-        uint256 minInvestment;
-        uint256 maxInvestment;
+/// @title IOwnmaliAsset
+/// @notice Interface for the OwnmaliAsset contract, an ERC-3643 compliant token for asset tokenization.
+interface IOwnmaliAsset is
+    Initializable,
+    UUPSUpgradeable,
+    AccessControlUpgradeable,
+    PausableUpgradeable,
+    ReentrancyGuardUpgradeable,
+    IToken
+{
+    /*//////////////////////////////////////////////////////////////
+                                 ERRORS
+    //////////////////////////////////////////////////////////////*/
+    error InvalidAddress(address addr, string parameter);
+    error InvalidString(string value, string parameter);
+    error InvalidId(bytes32 id, string parameter);
+    error InvalidAmount(uint256 value, string parameter);
+    error AssetInactive();
+    error TokensLocked(address account, uint48 unlockTime);
+    error TimelockNotExpired(uint48 unlockTime);
+    error TransferNotCompliant(address from, address to, uint256 amount);
+    error ExceedsMaxSupply(uint256 totalSupply, uint256 maxSupply);
+    error PremintCompleted();
+    error ArrayLengthMismatch(uint256 recipients, uint256 amounts);
+    error InvalidRecipientCount(uint256 count);
+
+    /*//////////////////////////////////////////////////////////////
+                             TYPE DECLARATIONS
+    //////////////////////////////////////////////////////////////*/
+    /// @notice Asset configuration structure.
+    struct AssetConfig {
+        bytes32 assetId;
         bytes32 assetType;
+        uint256 maxSupply;
+        uint128 tokenPrice;
+        uint8 dividendPct;
         bytes32 metadataCID;
         bytes32 legalMetadataCID;
-        bytes32 spvId;
-        bytes32 assetId;
-        address owner;
-        address factory;
-        address assetManager;
-        address financialLedger;
-        address orderManager;
-        address spvDao;
-        address owner_;
-        uint16 chainId;
-        bool isActive;
     }
 
-    // Errors
-    error InvalidAddress(address addr, string parameter);
-    error InvalidChainId(uint16 chainId);
-    error InvalidParameter(string parameter, string reason);
-    error ProjectInactive();
-    error InvalidMetadataCID(bytes32 owner);
-    error TokensLocked(address indexed user, uint48 unlockTime);
-    error InvalidMetadataUpdate(uint256 updateId);
-    error AlreadySigned(address indexed signer);
-    error UpdateAlreadyExecuted(uint256 updateId);
-    error UnauthorizedCaller(address caller);
+    /// @notice Structure for pending updates with timelock.
+    struct PendingUpdate {
+        bytes32 value;
+        bytes32 role;
+        bool isLegal;
+        bool grant;
+        address account;
+        uint48 unlockTime;
+    }
 
-    // Events
-    event LockPeriodSet(address indexed user, uint48 unlockTime, uint16 chainId);
-    event BatchLockPeriodSet(uint256 userCount, uint48 unlockTime, uint16 chainId);
-    event ProjectDeactivated(address indexed project, bytes32 reason, uint16 chainId);
-    event MetadataUpdateProposed(uint256 indexed updateId, bytes32 newCID, bool isLegal, uint16 chainId);
-    event MetadataUpdateSigned(uint256 indexed updateId, address indexed signer, uint16 chainId);
-    event MetadataUpdated(uint256 indexed updateId, bytes32 oldCID, bytes32 newCID, bool isLegal, uint16 chainId);
-    event ProjectContractsSet(address indexed escrow, address indexed orderManager, address indexed dao, uint16 chainId);
-    event EmergencyWithdrawal(address indexed recipient, uint256 amount, uint16 chainId);
-    event MaxDividendPctSet(uint256 newMaxDividendPct);
-    event DefaultLockPeriodSet(uint48 newLockPeriod);
-    event RequiredSignaturesSet(uint256 newRequiredSignatures);
+    /*//////////////////////////////////////////////////////////////
+                                 EVENTS
+    //////////////////////////////////////////////////////////////*/
+    event PremintCompleted(uint256 totalSupply, uint256 timestamp);
+    event Preminted(address indexed operator, uint256 totalAmount, uint256 recipientCount);
+    event LockPeriodSet(address indexed account, uint48 unlockTime);
+    event AssetStatusChanged(bool isActive);
+    event TokenPriceUpdated(uint128 oldPrice, uint128 newPrice);
+    event DividendPctUpdated(uint8 oldPct, uint8 newPct);
+    event MetadataUpdated(bytes32 oldCID, bytes32 newCID, bool isLegal);
 
-    // Initialization
-    function initialize(bytes memory initData) external;
-
-    // Metadata Management
-    function proposeMetadataUpdate(bytes32 newCID, bool isLegal) external;
-    function approveMetadataUpdate(uint256 updateId) external;
-
-    // Project Configuration
-    function setProjectContractsAndPreMint(
-        address _escrow,
-        address _orderManager,
-        address _dao,
-        uint256 _preMintAmount
+    /*//////////////////////////////////////////////////////////////
+                           INITIALIZATION
+    //////////////////////////////////////////////////////////////*/
+    function initialize(
+        string memory name,
+        string memory symbol,
+        address identityRegistry,
+        address compliance,
+        address owner,
+        address admin,
+        address operator,
+        bytes calldata configData
     ) external;
-    function setMaxDividendPct(uint256 _maxDividendPct) external;
-    function setDefaultLockPeriod(uint48 _lockPeriod) external;
-    function setRequiredSignatures(uint256 _requiredSignatures) external;
-    function setLockPeriod(address user, uint48 unlockTime) external;
 
-    // Pause Functionality
+    /*//////////////////////////////////////////////////////////////
+                           TOKEN MANAGEMENT FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+    function premint(address[] calldata recipients, uint256[] calldata amounts) external;
+    function completePremint() external;
+
+    /*//////////////////////////////////////////////////////////////
+                           CONFIGURATION FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+    function updateMetadata(bytes32 newCID, bool isLegal) external;
+    function batchSetLockPeriod(address[] calldata accounts, uint48[] calldata unlockTimes) external;
+    function setAssetStatus(bool isActive_) external;
+    function setTokenPrice(uint128 tokenPrice_) external;
+    function setDividendPct(uint8 dividendPct_) external;
+    function setRole(bytes32 role, address account, bool grant) external;
+    function revokeRole(bytes32 role, address account) external;
     function pause() external;
     function unpause() external;
 
-    // View Functions
-    function owner() external view returns (address);
-    function getIsActive() external view returns (bool);
-    function getInvestmentLimits() external view returns (uint256 minInvestment, uint256 maxInvestment);
-    function getProjectDetails() external view returns (AssetDetails memory);
-    function getProjectOwner() external view returns (address);
-    function getMetadataUpdate(uint256 updateId)
-        external
-        view
-        returns (
-            bytes32 newCID,
-            bool isLegal,
-            uint256 signatureCount,
-            bool executed
-        );
-    function hasSignedMetadataUpdate(uint256 updateId, address signer) external view returns (bool);
-    function getLockUntil(address account) external view returns (uint256);
+    /*//////////////////////////////////////////////////////////////
+                           VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+    function getAssetConfig() external view returns (AssetConfig memory config);
 
-    // Additional View Functions for State Variables
-    function spvId() external view returns (bytes32);
+    /*//////////////////////////////////////////////////////////////
+                           STATE VARIABLES
+    //////////////////////////////////////////////////////////////*/
+    function MAX_DIVIDEND_PCT() external view returns (uint8);
+    function TIMELOCK_DURATION() external view returns (uint48);
+    function ASSET_ADMIN_ROLE() external view returns (bytes32);
+    function ASSET_OPERATOR_ROLE() external view returns (bytes32);
     function assetId() external view returns (bytes32);
+    function assetType() external view returns (bytes32);
     function metadataCID() external view returns (bytes32);
     function legalMetadataCID() external view returns (bytes32);
-    function assetType() external view returns (bytes32);
-    function tokenPrice() external view returns (uint256);
-    function cancelDelay() external view returns (uint256);
+    function tokenPrice() external view returns (uint128);
     function dividendPct() external view returns (uint8);
-    function minInvestment() external view returns (uint256);
-    function maxInvestment() external view returns (uint256);
-    function eoiPct() external view returns (uint8);
-    function factory() external view returns (address);
-    function assetManager() external view returns (address);
-    function financialLedger() external view returns (address);
-    function orderManager() external view returns (address);
-    function spvDao() external view returns (address);
-    function chainId() external view returns (uint16);
-    function identityRegistry() external view returns (IIdentityRegistry);
-    function compliance() external view returns (IModularCompliance);
-    function maxDividendPct() external view returns (uint8);
-    function defaultLockPeriod() external view returns (uint48);
-    function requiredSignatures() external view returns (uint8);
+    function maxSupply() external view returns (uint256);
+    function isActive() external view returns (bool);
+    function isPremintCompleted() external view returns (bool);
+    function unlockTime(address account) external view returns (uint48);
+    function pendingUpdates(bytes32 actionId) external view returns (PendingUpdate memory);
 }

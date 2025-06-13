@@ -1,127 +1,127 @@
-SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+
 /// @title IOwnmaliRegistry
-/// @notice Interface for the OwnmaliRegistry contract, managing company and project metadata
-interface IOwnmaliRegistry {
-    /// @notice Structure for project details
-    struct Project {
+/// @notice Interface for the OwnmaliRegistry contract, managing SPV and asset metadata with SPV contract cloning in the Ownmali ecosystem.
+interface IOwnmaliRegistry is
+    Initializable,
+    UUPSUpgradeable,
+    PausableUpgradeable,
+    AccessControlUpgradeable,
+    ReentrancyGuardUpgradeable
+{
+    /*//////////////////////////////////////////////////////////////
+                                 ERRORS
+    //////////////////////////////////////////////////////////////*/
+    error InvalidId(bytes32 id, string parameter);
+    error InvalidString(string value, string parameter);
+    error InvalidAmount(uint256 value, string parameter);
+    error InvalidAddress(address addr, string parameter);
+    error SPVExists(bytes32 spvId);
+    error SPVNotFound(bytes32 spvId);
+    error AssetExists(bytes32 assetId);
+    error AssetNotFound(bytes32 assetId);
+    error MaxSPVsReached(uint256 current, uint256 max);
+    error MaxAssetsReached(bytes32 spvId, uint256 current, uint256 max);
+    error TimelockNotExpired(uint48 unlockTime);
+    error CloneFailed();
+    error SPVInitializationFailed();
+
+    /*//////////////////////////////////////////////////////////////
+                             TYPE DECLARATIONS
+    //////////////////////////////////////////////////////////////*/
+    struct SPV {
         string name;
-        bytes32 assetType;
-        address token;
-        bytes32 metadataCID;
+        string countryCode;
+        address spvAddress;
     }
 
-    /// @notice Emitted when a new company is registered
-    event CompanyRegistered(
-        bytes32 indexed companyId,
-        address indexed companyContract,
-        string name,
-        bool kycStatus,
-        string countryCode,
-        bytes32 metadataCID,
-        address owner
-    );
+    struct Asset {
+        bytes32 spvId;
+        string addressLocation;
+        bytes32 assetType;
+        uint256 totalSupply;
+        bytes32 metadataHash;
+    }
 
-    /// @notice Emitted when a new project is registered
-    event ProjectRegistered(
-        bytes32 indexed companyId,
-        bytes32 indexed projectId,
-        string name,
+    struct InitParams {
+        uint256 maxSPVs;
+        uint256 maxAssetsPerSPV;
+        address spvImplementation;
+    }
+
+    struct PendingUpdate {
+        address newAddress;
+        bytes32 role;
+        bool grant;
+        uint48 unlockTime;
+    }
+
+    interface OwnmaliSPV {
+        function initialize(bytes32 spvId, address registry) external;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                 EVENTS
+    //////////////////////////////////////////////////////////////*/
+    event SPVRegistered(bytes32 indexed spvId, address indexed spvAddress, string name);
+    event AssetRegistered(bytes32 indexed assetId, bytes32 indexed spvId, string addressLocation);
+    event SPVRemoved(bytes32 indexed spvId);
+    event AssetRemoved(bytes32 indexed assetId, bytes32 indexed spvId);
+    event SPVImplementationSet(address indexed implementation);
+
+    /*//////////////////////////////////////////////////////////////
+                           INITIALIZATION
+    //////////////////////////////////////////////////////////////*/
+    function initialize(InitParams memory params) external;
+
+    /*//////////////////////////////////////////////////////////////
+                           CONFIGURATION FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+    function setSPVImplementation(address _spvImplementation) external;
+    function setRegistryManagerRole(address account, bool grant) external;
+    function revokeAdminRole(address account) external;
+
+    /*//////////////////////////////////////////////////////////////
+                           SPV AND ASSET MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+    function registerSPV(bytes32 spvId, string memory name, string memory countryCode) external;
+    function removeSPV(bytes32 spvId) external;
+    function registerAsset(
+        bytes32 assetId,
+        bytes32 spvId,
+        string memory addressLocation,
         bytes32 assetType,
-        address token,
-        bytes32 metadataCID
-    );
-
-    /// @notice Emitted when project metadata is updated
-    event ProjectMetadataUpdated(
-        bytes32 indexed companyId,
-        bytes32 indexed projectId,
-        bytes32 oldCID,
-        bytes32 newCID
-    );
-
-    /// @notice Emitted when the company template is set
-    event CompanyTemplateSet(address indexed template);
-
-    /// @notice Emitted when the maximum number of companies is set
-    event MaxCompaniesSet(uint256 newMax);
-
-    /// @notice Emitted when the maximum number of projects per company is set
-    event MaxProjectsPerCompanySet(uint256 newMax);
-
-    /// @notice Initializes the registry contract
-    /// @param _admin Admin address for role assignment
-    function initialize(address _admin) external;
-
-    /// @notice Sets the company template for cloning
-    /// @param _companyTemplate Address of the company template contract
-    function setCompanyTemplate(address _companyTemplate) external;
-
-    /// @notice Sets the maximum number of companies
-    /// @param _maxCompanies New maximum number of companies
-    function setMaxCompanies(uint256 _maxCompanies) external;
-
-    /// @notice Sets the maximum number of projects per company
-    /// @param _maxProjects New maximum number of projects per company
-    function setMaxProjectsPerCompany(uint256 _maxProjects) external;
-
-    /// @notice Registers a new company by cloning the template
-    /// @param companyId Unique identifier for the company
-    /// @param name Company name (1-100 bytes)
-    /// @param kycStatus KYC verification status
-    /// @param countryCode ISO 3166-1 alpha-2 country code
-    /// @param metadataCID IPFS CID for company metadata
-    /// @param owner Company owner address
-    function registerCompany(
-        bytes32 companyId,
-        string calldata name,
-        bool kycStatus,
-        string calldata countryCode,
-        bytes32 metadataCID,
-        address owner
+        uint256 totalSupply,
+        bytes32 metadataHash
     ) external;
+    function removeAsset(bytes32 assetId) external;
 
-    /// @notice Registers a new project under a company
-    /// @param companyId Unique identifier for the company
-    /// @param projectId Unique identifier for the project
-    /// @param name Project name (1-100 bytes)
-    /// @param assetType Type of asset (Commercial, Residential, Land, Holiday)
-    /// @param token Project token contract address
-    /// @param metadataCID IPFS CID for project metadata
-    function registerProject(
-        bytes32 companyId,
-        bytes32 projectId,
-        string calldata name,
-        bytes32 assetType,
-        address token,
-        bytes32 metadataCID
-    ) external;
+    /*//////////////////////////////////////////////////////////////
+                           VIEW FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+    function getSPV(bytes32 spvId) external view returns (SPV memory);
+    function getAsset(bytes32 assetId) external view returns (Asset memory);
+    function getAllSPVs(uint256 offset, uint256 limit) external view returns (bytes32[] memory spvIds);
+    function getAllAssetIds(bytes32 spvId, uint256 offset, uint256 limit) external view returns (bytes32[] memory assetIds);
 
-    /// @notice Updates project metadata CID
-    /// @param companyId Unique identifier for the company
-    /// @param projectId Unique identifier for the project
-    /// @param newMetadataCID New IPFS CID for project metadata
-    function updateProjectMetadata(
-        bytes32 companyId,
-        bytes32 projectId,
-        bytes32 newMetadataCID
-    ) external;
-
-    /// @notice Gets company contract address by ID
-    /// @param companyId Unique identifier for the company
-    /// @return Company contract address
-    function getCompanyAddress(bytes32 companyId) external view returns (address);
-
-    /// @notice Gets project details by company and project ID
-    /// @param companyId Unique identifier for the company
-    /// @param projectId Unique identifier for the project
-    /// @return Project details
-    function getProject(bytes32 companyId, bytes32 projectId) external view returns (Project memory);
-
-    /// @notice Pauses the contract
-    function pause() external;
-
-    /// @notice Unpauses the contract
-    function unpause() external;
+    /*//////////////////////////////////////////////////////////////
+                           STATE VARIABLES
+    //////////////////////////////////////////////////////////////*/
+    function TIMELOCK_DURATION() external view returns (uint48);
+    function REGISTRY_MANAGER_ROLE() external view returns (bytes32);
+    function maxSPVs() external view returns (uint256);
+    function maxAssetsPerSPV() external view returns (uint256);
+    function spvCount() external view returns (uint256);
+    function assetCount(bytes32 spvId) external view returns (uint256);
+    function spvs(bytes32 spvId) external view returns (SPV memory);
+    function assets(bytes32 assetId) external view returns (Asset memory);
+    function spvImplementation() external view returns (address);
+    function pendingUpdates(bytes32 actionId) external view returns (PendingUpdate memory);
 }
